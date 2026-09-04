@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #3 Milestone tree view (next)
-- **Current Branch**: main
+- **Current Issue**: #3 Milestone tree view (implemented, merging)
+- **Current Branch**: issue-3-milestone-tree
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -27,6 +27,8 @@
 - [2026-09-04 02:45] @jwanga: PR #12 reviewed by 3 agents (0 Critical, 14 Important) — all auto-fixed (rule #15): header reserves the `no-token`/`!` suffix before truncating the branch; poll loop ticks every 2 s for cwd changes and fetches on repo change / 10 s / `r` with the refresh queue drained; 403/429 backoff via `Retry-After` or `X-RateLimit-Reset` (`RateLimited` error); one-hop redirect follow for renamed repos; `Msg::Error` carries the repo and clears a stale snapshot from another repo; shared `util::stdout`, `Pane::live_cwd`, `right_count`/`item_row` helpers; README auth wording. 16 tests.
 - [2026-09-04 02:55] @jwanga: Issue #2 done — PR #12 merged; milestone 1 at 2/6.
 - [2026-09-04 02:55] @jwanga: Refreshed architecture diagram (trigger: issue-close #2, diagram type: flowchart)
+- [2026-09-04 03:10] @jwanga: Issue #3 gate — accepted defaults: progress bar only at ≥32 columns; sections + open milestones expanded by default, closed groups collapsed; `open`/`xdg-open` for `o`.
+- [2026-09-04 03:30] @jwanga: Issue #3 implemented on `issue-3-milestone-tree`: `src/ui/{mod,tree}.rs` (row flattening with `TreeState`, section/group/milestone/issue/PR rows, 24 h recently-closed group), `util::parse_rfc3339`, `app.rs` cursor/scroll/section-jump/toggle/help/mouse, footer position. 23 tests. Verified live in herdr: j/k, Enter collapse, `?` help, footer `n/total`.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

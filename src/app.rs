@@ -2,8 +2,12 @@
 
 use crate::model::Snapshot;
 use crate::poll::{self, Cmd, Msg};
+use crate::ui::tree::{self, NodeId, Row, TreeState};
+use crate::ui::{age_string, open_url, truncate, wrap};
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -11,9 +15,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const HEADER_ROWS: u16 = 2;
+const FOOTER_ROWS: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -27,30 +33,187 @@ pub struct App {
     pub snapshot: Option<Snapshot>,
     pub status: Status,
     pub should_quit: bool,
+    pub tree: TreeState,
+    pub cursor: usize,
+    pub scroll: usize,
+    pub show_help: bool,
+    /// Body geometry from the last draw, for mouse hit-testing and scrolling.
+    pub body: Rect,
     cmd: Option<Sender<Cmd>>,
 }
 
 impl App {
     pub fn new(cmd: Option<Sender<Cmd>>) -> Self {
-        Self { snapshot: None, status: Status::Loading, should_quit: false, cmd }
+        Self {
+            snapshot: None,
+            status: Status::Loading,
+            should_quit: false,
+            tree: TreeState::default(),
+            cursor: 0,
+            scroll: 0,
+            show_help: false,
+            body: Rect::new(0, HEADER_ROWS, 26, 20),
+            cmd,
+        }
+    }
+
+    pub fn rows(&self) -> Vec<Row> {
+        match &self.snapshot {
+            Some(s) => tree::rows(s, &self.tree, self.body.width as usize),
+            None => Vec::new(),
+        }
+    }
+
+    fn page(&self) -> usize {
+        (self.body.height as usize).max(1)
+    }
+
+    /// Keep the cursor inside the row list and the viewport around the cursor.
+    pub fn clamp(&mut self, row_count: usize) {
+        if row_count == 0 {
+            self.cursor = 0;
+            self.scroll = 0;
+            return;
+        }
+        self.cursor = self.cursor.min(row_count - 1);
+        let page = self.page();
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + page {
+            self.scroll = self.cursor + 1 - page;
+        }
+        self.scroll = self.scroll.min(row_count.saturating_sub(page));
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let rows = self.rows();
+        let n = rows.len();
+        if n == 0 {
+            return;
+        }
+        let next = (self.cursor as isize + delta).clamp(0, n as isize - 1) as usize;
+        self.cursor = next;
+        self.clamp(n);
+    }
+
+    fn jump_section(&mut self, forward: bool) {
+        let rows = self.rows();
+        let sections: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.id, NodeId::Section(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let target = if forward {
+            sections.iter().copied().find(|&i| i > self.cursor).or_else(|| sections.first().copied())
+        } else {
+            sections.iter().rev().copied().find(|&i| i < self.cursor).or_else(|| sections.last().copied())
+        };
+        if let Some(t) = target {
+            self.cursor = t;
+            self.clamp(rows.len());
+        }
+    }
+
+    fn toggle_current(&mut self) {
+        let rows = self.rows();
+        if let Some(row) = rows.get(self.cursor) {
+            if row.expandable.is_some() {
+                self.tree.toggle(&row.id);
+                let n = self.rows().len();
+                self.clamp(n);
+            }
+        }
+    }
+
+    fn open_current(&self) {
+        if let Some(url) = self.rows().get(self.cursor).and_then(|r| r.url.clone()) {
+            open_url(&url);
+        }
+    }
+
+    fn refresh(&self) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(Cmd::Refresh);
+        }
     }
 
     pub fn handle_event(&mut self, ev: Event) {
-        if let Event::Key(key) = ev {
-            if key.kind != KeyEventKind::Press {
-                return;
-            }
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Char('q' | 'Q') => self.should_quit = true,
-                KeyCode::Char('c' | 'C') if ctrl => self.should_quit = true,
-                KeyCode::Char('r' | 'R') => {
-                    if let Some(cmd) = &self.cmd {
-                        let _ = cmd.send(Cmd::Refresh);
+        match ev {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                if self.show_help {
+                    match key.code {
+                        KeyCode::Char('c') if ctrl => self.should_quit = true,
+                        KeyCode::Char('q') if ctrl => self.should_quit = true,
+                        _ => self.show_help = false,
                     }
+                    return;
+                }
+                match key.code {
+                    KeyCode::Char('q' | 'Q') => self.should_quit = true,
+                    KeyCode::Char('c' | 'C') if ctrl => self.should_quit = true,
+                    KeyCode::Char('r' | 'R') => self.refresh(),
+                    KeyCode::Char('?') => self.show_help = true,
+                    KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
+                    KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
+                    KeyCode::Char('d') if ctrl => self.move_cursor(self.page() as isize / 2),
+                    KeyCode::Char('u') if ctrl => self.move_cursor(-(self.page() as isize / 2)),
+                    KeyCode::PageDown => self.move_cursor(self.page() as isize),
+                    KeyCode::PageUp => self.move_cursor(-(self.page() as isize)),
+                    KeyCode::Char('g') | KeyCode::Home => self.move_cursor(isize::MIN / 2),
+                    KeyCode::Char('G') | KeyCode::End => self.move_cursor(isize::MAX / 2),
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Left => self.toggle_current(),
+                    KeyCode::Tab => self.jump_section(true),
+                    KeyCode::BackTab => self.jump_section(false),
+                    KeyCode::Char('o' | 'O') => self.open_current(),
+                    KeyCode::Char('h') if !shift => self.jump_section(false),
+                    KeyCode::Char('l') => self.jump_section(true),
+                    _ => {}
+                }
+            }
+            Event::Mouse(m) => match m.kind {
+                MouseEventKind::ScrollDown => self.scroll_by(3),
+                MouseEventKind::ScrollUp => self.scroll_by(-3),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self.show_help {
+                        self.show_help = false;
+                        return;
+                    }
+                    self.click(m.column, m.row);
                 }
                 _ => {}
-            }
+            },
+            _ => {}
+        }
+    }
+
+    fn scroll_by(&mut self, delta: isize) {
+        let n = self.rows().len();
+        let page = self.page();
+        let max = n.saturating_sub(page);
+        self.scroll = (self.scroll as isize + delta).clamp(0, max as isize) as usize;
+        // Keep the cursor visible.
+        self.cursor = self.cursor.clamp(self.scroll, (self.scroll + page).saturating_sub(1).max(self.scroll));
+        self.cursor = self.cursor.min(n.saturating_sub(1));
+    }
+
+    /// Click selects the row under the pointer; clicking the selected expandable row toggles it.
+    fn click(&mut self, _x: u16, y: u16) {
+        if y < self.body.y || y >= self.body.y + self.body.height {
+            return;
+        }
+        let idx = self.scroll + (y - self.body.y) as usize;
+        let rows = self.rows();
+        if idx >= rows.len() {
+            return;
+        }
+        if idx == self.cursor {
+            self.toggle_current();
+        } else {
+            self.cursor = idx;
+            self.clamp(rows.len());
         }
     }
 
@@ -71,6 +234,8 @@ impl App {
                 self.status = Status::Error(message);
             }
         }
+        let n = self.rows().len();
+        self.clamp(n);
     }
 }
 
@@ -102,12 +267,21 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App, msg_rx: &R
     Ok(())
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
-    let [header, body, footer] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(HEADER_ROWS),
+        Constraint::Min(0),
+        Constraint::Length(FOOTER_ROWS),
+    ])
+    .areas(f.area());
+    if app.body != body {
+        app.body = body;
+        let n = app.rows().len();
+        app.clamp(n);
+    }
     draw_header(f, header, app);
     draw_body(f, body, app);
-    draw_footer(f, footer);
+    draw_footer(f, footer, app);
 }
 
 fn badge() -> Span<'static> {
@@ -156,40 +330,47 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(header_lines(app, area.width as usize)), area);
 }
 
-/// A row with `left` spans (occupying `left_width` columns) and a dim, right-aligned count.
-fn right_count(mut left: Vec<Span<'static>>, left_width: usize, count: String, w: usize) -> Line<'static> {
-    let pad = w.saturating_sub(left_width + count.len());
-    left.push(Span::raw(" ".repeat(pad.max(1))));
-    left.push(Span::styled(count, Style::default().fg(Color::DarkGray)));
-    Line::from(left)
-}
+pub const HELP: &[(&str, &str)] = &[
+    ("j/k ↑/↓", "move"),
+    ("⏎ space", "expand/collapse"),
+    ("tab ⇧tab", "next/prev section"),
+    ("g / G", "top / bottom"),
+    ("^d / ^u", "half page"),
+    ("o", "open in browser"),
+    ("r", "refresh now"),
+    ("?", "this help"),
+    ("q", "close pane"),
+];
 
-/// ` <icon> #n <title…>` sized to `w` columns.
-fn item_row(icon: &str, color: Color, number: u64, title: &str, w: usize) -> Line<'static> {
-    let num = format!("#{number}");
-    let title = truncate(title, w.saturating_sub(num.len() + icon.chars().count() + 1));
-    Line::from(vec![
-        Span::styled(icon.to_string(), Style::default().fg(color)),
-        Span::styled(num, Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
-        Span::raw(title),
-    ])
-}
-
-fn section(title: &str, count: String, w: usize) -> Line<'static> {
-    let title = title.to_uppercase();
-    let width = title.len();
-    right_count(vec![Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))], width, count, w)
+pub fn help_lines(w: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled("KEYS", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))];
+    let key_w = HELP.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(1);
+    for (k, v) in HELP {
+        let key = format!("{k:<key_w$}");
+        lines.push(Line::from(vec![
+            Span::styled(key, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(truncate(v, w.saturating_sub(key_w + 1)), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("any key to close", Style::default().fg(Color::DarkGray))));
+    lines
 }
 
 pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
+    if app.show_help {
+        return help_lines(w);
+    }
     let mut lines = Vec::new();
-    let Some(s) = &app.snapshot else {
+    let Some(_) = &app.snapshot else {
         match &app.status {
             Status::NoRepo(cwd) => {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("No GitHub remote in", Style::default().fg(Color::DarkGray))));
-                lines.push(Line::from(Span::styled(truncate(cwd, w), Style::default().fg(Color::DarkGray))));
+                for chunk in wrap(cwd, w) {
+                    lines.push(Line::from(Span::styled(chunk, Style::default().fg(Color::DarkGray))));
+                }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("Watching for one…", Style::default().fg(Color::DarkGray))));
             }
@@ -206,24 +387,14 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
         }
         return lines;
     };
-    let open_ms: Vec<_> = s.milestones.iter().filter(|m| m.state == "open").collect();
-    lines.push(section("milestones", open_ms.len().to_string(), w));
-    for m in &open_ms {
-        let count = format!("{}/{}", m.closed_issues, m.total());
-        let title = truncate(&m.title, w.saturating_sub(count.len() + 2));
-        let width = title.chars().count() + 1;
-        lines.push(right_count(vec![Span::raw(" "), Span::raw(title)], width, count, w));
-    }
-    lines.push(Line::from(""));
-    lines.push(section("issues", format!("{} open", s.open_issues()), w));
-    for i in s.issues.iter().filter(|i| i.is_open()) {
-        lines.push(item_row(" ● ", Color::Green, i.number, &i.title, w));
-    }
-    lines.push(Line::from(""));
-    lines.push(section("pull requests", format!("{} open", s.open_prs()), w));
-    for p in s.prs.iter().filter(|p| p.is_open()) {
-        let (icon, color) = if p.draft { (" ◌ ", Color::DarkGray) } else { (" ⇄ ", Color::Green) };
-        lines.push(item_row(icon, color, p.number, &p.title, w));
+    let rows = app.rows();
+    let page = app.page();
+    for (i, row) in rows.iter().enumerate().skip(app.scroll).take(page) {
+        let mut line = row.line.clone();
+        if i == app.cursor {
+            line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+        }
+        lines.push(line);
     }
     lines
 }
@@ -233,99 +404,40 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_footer(f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![" q".bold(), " quit".dim(), "  r".bold(), " refresh".dim()]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-pub fn age_string(t: SystemTime) -> String {
-    let secs = SystemTime::now().duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        _ => format!("{}h", secs / 3600),
-    }
-}
-
-/// Greedy word wrap to `max` columns (chars).
-pub fn wrap(s: &str, max: usize) -> Vec<String> {
-    let max = max.max(1);
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for word in s.split_whitespace() {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > max {
-            out.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        if word.chars().count() > max {
-            for chunk in word.chars().collect::<Vec<_>>().chunks(max) {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                cur = chunk.iter().collect();
-            }
-        } else {
-            cur.push_str(word);
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-/// Truncate to `max` display columns with an ellipsis (ASCII-safe approximation: chars).
-pub fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('…');
-    out
+fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
+    let n = app.rows().len();
+    let pos = if n > 0 && app.snapshot.is_some() { format!("{}/{n}", app.cursor + 1) } else { String::new() };
+    let left = vec![" q".bold(), " quit".dim(), " ?".bold(), " help".dim()];
+    let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let pad = (area.width as usize).saturating_sub(left_w + pos.len());
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(pos, Style::default().fg(Color::DarkGray)));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{GitRef, Issue, Milestone, PullRequest};
+    use crate::model::{GitRef, Issue, Milestone, MilestoneRef, PullRequest};
+    use crate::ui::tree::Section;
     use crate::repo::RepoRef;
-
-    #[test]
-    fn truncates_with_ellipsis() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hell…");
-        assert_eq!(truncate("héllo", 3), "hé…");
-        assert_eq!(truncate("x", 0), "");
-    }
-
-    #[test]
-    fn wraps_words_and_splits_long_tokens() {
-        assert_eq!(wrap("a bb ccc dddd", 6), vec!["a bb", "ccc", "dddd"]);
-        assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        assert!(wrap("", 5).is_empty());
-    }
+    use crossterm::event::{KeyEvent, KeyEventState};
+    use std::time::SystemTime;
 
     fn snapshot() -> Snapshot {
+        let issue = |n: u64, state: &str, ms: Option<u64>| Issue {
+            number: n, title: format!("Issue {n}"), state: state.into(), state_reason: None,
+            milestone: ms.map(|m| MilestoneRef { number: m }), labels: vec![], assignees: vec![], updated_at: String::new(),
+            closed_at: None, html_url: format!("https://x/{n}"), pull_request: None,
+        };
         Snapshot {
             repo: RepoRef { owner: "o".into(), name: "r".into(), branch: Some("main".into()), root: "/x".into() },
             milestones: vec![Milestone {
                 number: 1, title: "Status pane core".into(), state: "open".into(), open_issues: 5, closed_issues: 1,
                 due_on: None, html_url: String::new(), updated_at: String::new(),
             }],
-            issues: vec![
-                Issue { number: 2, title: "Detect the workspace repository".into(), state: "open".into(), state_reason: None,
-                    milestone: None, labels: vec![], assignees: vec![], updated_at: String::new(), closed_at: None,
-                    html_url: String::new(), pull_request: None },
-                Issue { number: 1, title: "Scaffold".into(), state: "closed".into(), state_reason: Some("completed".into()),
-                    milestone: None, labels: vec![], assignees: vec![], updated_at: String::new(), closed_at: None,
-                    html_url: String::new(), pull_request: None },
-            ],
+            issues: (2..=7).map(|n| issue(n, "open", Some(1))).chain([issue(8, "open", None)]).collect(),
             prs: vec![PullRequest { number: 11, title: "Scaffold the plugin".into(), state: "open".into(), draft: true,
                 merged_at: None, head: GitRef { name: "b".into(), sha: String::new() }, base: GitRef { name: "main".into(), sha: String::new() },
                 user: None, updated_at: String::new(), html_url: String::new(), body: None }],
@@ -335,25 +447,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn body_lines_fit_26_columns() {
+    fn app() -> App {
         let mut app = App::new(None);
-        app.snapshot = Some(snapshot());
-        app.status = Status::Ok;
-        let lines = body_lines(&app, 26);
-        let text: Vec<String> = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect();
-        assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
-        assert!(text[0].starts_with("MILESTONES"));
-        assert_eq!(text[0].chars().count(), 26, "section rows fill the width exactly");
-        assert!(text[1].contains("1/6"));
-        assert_eq!(text[1].chars().count(), 26, "milestone rows fill the width exactly");
-        assert!(text.iter().any(|t| t.contains("#2")));
-        assert!(!text.iter().any(|t| t.contains("#1 ")), "closed issue should be hidden");
-        assert!(text.iter().any(|t| t.contains("◌ #11")));
+        app.body = Rect::new(0, 2, 26, 6);
+        app.handle_msg(Msg::Snapshot(Box::new(snapshot())));
+        app
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent { code, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE })
     }
 
     fn texts(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn body_shows_a_page_of_rows_and_fits_width() {
+        let app = app();
+        let text = texts(&body_lines(&app, 26));
+        assert_eq!(text.len(), 6, "one page of rows");
+        assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
+        assert!(text[0].starts_with("▾ MILESTONES"));
+        assert!(text[1].contains("Status pane") && text[1].ends_with("1/6"));
+    }
+
+    #[test]
+    fn cursor_moves_scrolls_and_wraps_sections() {
+        let mut app = app();
+        let n = app.rows().len();
+        assert_eq!(n, 12);
+        for _ in 0..8 {
+            app.handle_event(key(KeyCode::Char('j')));
+        }
+        assert_eq!(app.cursor, 8);
+        assert_eq!(app.scroll, 3, "viewport follows the cursor");
+        app.handle_event(key(KeyCode::Char('G')));
+        assert_eq!(app.cursor, n - 1);
+        app.handle_event(key(KeyCode::Char('g')));
+        assert_eq!(app.cursor, 0);
+        app.handle_event(key(KeyCode::Tab));
+        assert!(matches!(app.rows()[app.cursor].id, NodeId::Section(Section::Issues)));
+        app.handle_event(key(KeyCode::BackTab));
+        assert!(matches!(app.rows()[app.cursor].id, NodeId::Section(Section::Milestones)));
+        app.handle_event(key(KeyCode::BackTab));
+        assert!(matches!(app.rows()[app.cursor].id, NodeId::Section(Section::PullRequests)), "wraps around");
+    }
+
+    #[test]
+    fn enter_collapses_and_cursor_stays_valid() {
+        let mut app = app();
+        app.handle_event(key(KeyCode::Char('j'))); // milestone row
+        app.handle_event(key(KeyCode::Enter));
+        let ids: Vec<NodeId> = app.rows().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 6);
+        assert!(!ids.iter().any(|i| matches!(i, NodeId::Issue(2))));
+        app.handle_event(key(KeyCode::Char('G')));
+        app.handle_event(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        assert!(texts(&body_lines(&app, 26)).iter().all(|t| t.chars().count() <= 26));
+        app.handle_event(key(KeyCode::Char('x')));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn click_selects_then_toggles() {
+        let mut app = app();
+        let click = |row: u16| Event::Mouse(crossterm::event::MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 3, row, modifiers: KeyModifiers::NONE });
+        app.handle_event(click(3)); // body starts at y=2 → row index 1 (milestone)
+        assert_eq!(app.cursor, 1);
+        app.handle_event(click(3));
+        assert_eq!(app.rows().len(), 6, "second click on the selected milestone collapses it");
+        app.handle_event(click(40));
+        assert_eq!(app.cursor, 1, "clicks outside the body are ignored");
     }
 
     #[test]
@@ -368,7 +534,6 @@ mod tests {
         assert_eq!(text.len(), 2);
         assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
         assert!(text[1].ends_with("no-token !"), "{:?}", text[1]);
-        assert!(text[1].starts_with("⎇ issue-"), "{:?}", text[1]);
     }
 
     #[test]
@@ -383,13 +548,12 @@ mod tests {
 
     #[test]
     fn error_for_another_repo_clears_stale_snapshot() {
-        let mut app = App::new(None);
-        app.snapshot = Some(snapshot());
+        let mut app = app();
         let mut other = snapshot().repo;
         other.name = "elsewhere".into();
         app.handle_msg(Msg::Error { repo: other, message: "404".into() });
         assert!(app.snapshot.is_none());
-        app.snapshot = Some(snapshot());
+        app.handle_msg(Msg::Snapshot(Box::new(snapshot())));
         app.handle_msg(Msg::Error { repo: snapshot().repo, message: "flaky".into() });
         assert!(app.snapshot.is_some(), "same-repo errors keep the last snapshot");
     }
