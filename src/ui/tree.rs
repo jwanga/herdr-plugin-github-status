@@ -102,22 +102,22 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn recently_closed(issue: &Issue, now: u64) -> bool {
-    issue
-        .closed_at
-        .as_deref()
-        .and_then(parse_rfc3339)
-        .is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
+/// Whether an RFC 3339 timestamp is within the recently-closed window of `now`.
+fn is_recent(ts: Option<&str>, now: u64) -> bool {
+    ts.and_then(parse_rfc3339).is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
 }
 
 /// Issue number from a branch named `issue-<n>-…` (the engineering-plugin convention).
 pub fn issue_from_branch(branch: &str) -> Option<u64> {
     let rest = branch.strip_prefix("issue-")?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() || !rest[digits.len()..].starts_with(['-', '/']) && rest.len() != digits.len() {
-        return None;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let (digits, tail) = rest.split_at(end);
+    let bounded = tail.is_empty() || tail.starts_with(['-', '/']);
+    if bounded {
+        digits.parse().ok()
+    } else {
+        None
     }
-    digits.parse().ok()
 }
 
 /// The issue being worked on: from the branch name, else the first issue the current
@@ -127,18 +127,14 @@ pub fn active_issue(s: &Snapshot) -> Option<u64> {
     issue_from_branch(branch).or_else(|| current_pr(s).and_then(|p| p.extra.closes.first().copied()))
 }
 
-/// The open PR whose head is the current branch.
+/// The open PR whose head is the current branch *in this repository* (a fork's branch of
+/// the same name is not ours).
 pub fn current_pr(s: &Snapshot) -> Option<&PullRequest> {
     let branch = s.repo.branch.as_deref()?;
-    s.prs.iter().find(|p| p.is_open() && p.head.name == branch)
-}
-
-fn recently_closed_pr(p: &PullRequest, now: u64) -> bool {
-    p.closed_at
-        .as_deref()
-        .or(p.merged_at.as_deref())
-        .and_then(parse_rfc3339)
-        .is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
+    let full = s.repo.full_name();
+    s.prs.iter().find(|p| {
+        p.is_open() && p.head.name == branch && p.head.repo.as_ref().is_some_and(|r| r.full_name.eq_ignore_ascii_case(&full))
+    })
 }
 
 /// Flatten the snapshot into visible nodes for `state`; `now` (Unix seconds) bounds the
@@ -152,7 +148,8 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     let now_issue = active.and_then(|n| s.issues.iter().find(|i| i.number == n));
     let now_pr = current_pr(s);
     let busy = agents.iter().filter(|a| a.status == "working" || a.status == "blocked").count();
-    let count = if now_issue.is_none() && now_pr.is_none() && agents.is_empty() { "idle".to_string() } else { format!("{busy} busy") };
+    let idle = active.is_none() && now_pr.is_none();
+    let count = if busy > 0 { format!("{busy} busy") } else { "idle".to_string() };
     if section(&mut out, state, Section::Now, count, format!("{repo_url}/pulls")) {
         if let Some(i) = now_issue {
             out.push(Node { id: NodeId::NowIssue(i.number), depth: 1, expandable: None, url: Some(i.html_url.clone()), kind: NodeKind::Issue { issue: i.clone(), active: true } });
@@ -162,11 +159,11 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
         if let Some(p) = now_pr {
             out.push(Node { id: NodeId::NowPr(p.number), depth: 1, expandable: None, url: Some(p.html_url.clone()), kind: NodeKind::Pr(p.clone()) });
         }
+        if idle {
+            out.push(Node { id: NodeId::Idle, depth: 1, expandable: None, url: None, kind: NodeKind::Info("nothing in progress".into()) });
+        }
         for a in agents {
             out.push(Node { id: NodeId::Agent(a.pane_id.clone()), depth: 1, expandable: None, url: None, kind: NodeKind::Agent(a.clone()) });
-        }
-        if now_issue.is_none() && active.is_none() && now_pr.is_none() && agents.is_empty() {
-            out.push(Node { id: NodeId::Idle, depth: 1, expandable: None, url: None, kind: NodeKind::Info("nothing in progress".into()) });
         }
     }
 
@@ -199,7 +196,7 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     let mut recent: Vec<&Issue> = s
         .issues
         .iter()
-        .filter(|i| i.milestone.is_none() && !i.is_open() && recently_closed(i, now))
+        .filter(|i| i.milestone.is_none() && !i.is_open() && is_recent(i.closed_at.as_deref(), now))
         .collect();
     recent.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
     if section(&mut out, state, Section::Issues, format!("{} open", unassigned.len()), format!("{repo_url}/issues")) {
@@ -225,7 +222,11 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     // ---- Pull requests
     let mut open_prs: Vec<&PullRequest> = s.prs.iter().filter(|p| p.is_open()).collect();
     open_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let mut recent_prs: Vec<&PullRequest> = s.prs.iter().filter(|p| !p.is_open() && recently_closed_pr(p, now)).collect();
+    let mut recent_prs: Vec<&PullRequest> = s
+        .prs
+        .iter()
+        .filter(|p| !p.is_open() && is_recent(p.closed_at.as_deref().or(p.merged_at.as_deref()), now))
+        .collect();
     recent_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     if section(&mut out, state, Section::PullRequests, format!("{} open", open_prs.len()), format!("{repo_url}/pulls")) {
         for p in &open_prs {
@@ -344,9 +345,10 @@ pub fn pr_tail(p: &PullRequest) -> String {
         Some("REVIEW_REQUIRED") => 'R',
         _ => '·',
     };
+    // The rollup `state` breaks ties when the counted contexts were truncated.
     let checks = match p.extra.checks.as_ref() {
-        Some(c) if c.failed > 0 => '✗',
-        Some(c) if c.pending > 0 => '◔',
+        Some(c) if c.failed > 0 || matches!(c.state.as_str(), "FAILURE" | "ERROR") => '✗',
+        Some(c) if c.pending > 0 || c.state == "PENDING" => '◔',
         Some(c) if c.total > 0 => '✓',
         _ => '·',
     };
@@ -460,7 +462,7 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Checks, GitRef, MilestoneRef, PrExtra, Snapshot, User};
+    use crate::model::{Checks, GitRef, MilestoneRef, PrExtra, RepoShort, Snapshot, User};
     use crate::repo::RepoRef;
 
     const NOW: u64 = 1_788_507_932; // 2026-09-04T07:45:32Z
@@ -472,7 +474,8 @@ mod tests {
         Issue { number, title: title.into(), state: state.into(), state_reason: (state == "closed").then(|| "completed".to_string()), milestone: milestone.map(|n| MilestoneRef { number: n }), labels: vec![], assignees: vec![], updated_at: String::new(), closed_at: closed_at.map(str::to_string), html_url: format!("https://i/{number}"), pull_request: None }
     }
     fn pr(number: u64, draft: bool) -> PullRequest {
-        PullRequest { number, title: format!("PR {number}"), state: "open".into(), draft, merged_at: None, closed_at: None, head: GitRef { name: format!("branch-{number}"), sha: String::new() }, base: GitRef { name: "main".into(), sha: String::new() }, user: None, updated_at: String::new(), html_url: format!("https://p/{number}"), body: None, extra: PrExtra::default() }
+        let repo = Some(RepoShort { full_name: "o/r".into() });
+        PullRequest { number, title: format!("PR {number}"), state: "open".into(), draft, merged_at: None, closed_at: None, head: GitRef { name: format!("branch-{number}"), sha: String::new(), repo: repo.clone() }, base: GitRef { name: "main".into(), sha: String::new(), repo }, user: None, updated_at: String::new(), html_url: format!("https://p/{number}"), body: None, extra: PrExtra::default() }
     }
     fn nodes(s: &Snapshot, st: &TreeState, now: u64) -> Vec<Node> {
         flatten(s, st, now, &[])
@@ -577,6 +580,8 @@ mod tests {
         assert_eq!(issue_from_branch("issue-7/x"), Some(7));
         assert_eq!(issue_from_branch("issues-12"), None);
         assert_eq!(issue_from_branch("issue-abc"), None);
+        assert_eq!(issue_from_branch("issue-12abc"), None);
+        assert_eq!(issue_from_branch("issue-"), None);
         assert_eq!(issue_from_branch("main"), None);
         let mut s = snap();
         s.repo.branch = Some("branch-20".into());
@@ -585,13 +590,40 @@ mod tests {
         assert_eq!(active_issue(&s), Some(5), "falls back to the branch PR's closing issue");
         s.repo.branch = Some("issue-10-x".into());
         assert_eq!(active_issue(&s), Some(10), "branch name wins");
+        // A fork PR whose head happens to share our branch name is not ours.
+        s.repo.branch = Some("branch-20".into());
+        s.prs[0].head.repo = Some(RepoShort { full_name: "someone/r".into() });
+        assert!(current_pr(&s).is_none());
+        s.prs[0].head.repo = None;
+        assert!(current_pr(&s).is_none());
+    }
+
+    #[test]
+    fn now_section_on_main_with_idle_agent() {
+        let mut s = snap();
+        s.repo.branch = Some("main".into());
+        let agents = vec![AgentInfo { pane_id: "w1:p1".into(), agent: "claude".into(), status: "idle".into(), title: None }];
+        let nodes = flatten(&s, &TreeState::default(), NOW, &agents);
+        let t = texts(&nodes, 26);
+        assert!(t[0].ends_with("idle"), "{:?}", t[0]);
+        assert_eq!(nodes[1].id, NodeId::Idle);
+        assert!(matches!(nodes[2].id, NodeId::Agent(_)));
+        assert!(!nodes.iter().any(|n| matches!(n.id, NodeId::NowPr(_) | NodeId::NowIssue(_))));
+        // A branch whose issue is out of view still counts as active.
+        s.repo.branch = Some("issue-99-x".into());
+        let nodes = flatten(&s, &TreeState::default(), NOW, &[]);
+        let t = texts(&nodes, 26);
+        assert!(t[0].ends_with("idle"), "no busy agents: {:?}", t[0]);
+        assert_eq!(nodes[1].id, NodeId::NowIssue(99));
+        assert!(t[1].contains("#99"), "{:?}", t[1]);
+        assert!(!nodes.iter().any(|n| n.id == NodeId::Idle));
     }
 
     #[test]
     fn now_section_and_pr_rows() {
         let mut s = snap();
         s.repo.branch = Some("branch-20".into());
-        s.prs[0].extra = PrExtra { review: Some("APPROVED".into()), mergeable: None, checks: Some(Checks { state: "PENDING".into(), total: 2, failed: 0, pending: 1 }), closes: vec![5] };
+        s.prs[0].extra = PrExtra { review: Some("APPROVED".into()), checks: Some(Checks { state: "PENDING".into(), total: 2, failed: 0, pending: 1 }), closes: vec![5] };
         s.prs[1].state = "closed".into();
         s.prs[1].merged_at = Some("2026-09-04T06:00:00Z".into());
         s.prs[1].closed_at = Some("2026-09-04T06:00:00Z".into());

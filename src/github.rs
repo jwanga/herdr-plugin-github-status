@@ -1,10 +1,12 @@
-//! Minimal GitHub REST client: token discovery, paginated GETs, rate-limit tracking.
+//! GitHub REST + GraphQL client: token discovery, paginated GETs, rate-limit tracking, and
+//! the per-refresh PR enrichment query.
 
-use crate::model::{closing_refs, Checks, Issue, Milestone, PrExtra, PullRequest, Snapshot};
+use crate::model::{closing_refs, review_decision, Issue, Milestone, PrExtra, PullRequest, Review, Snapshot};
 use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
 
@@ -16,7 +18,7 @@ const PR_EXTRA_QUERY: &str = r#"query($owner:String!,$name:String!){
   repository(owner:$owner,name:$name){
     pullRequests(first:50,states:[OPEN],orderBy:{field:UPDATED_AT,direction:DESC}){
       nodes{
-        number reviewDecision mergeable
+        number reviewDecision
         closingIssuesReferences(first:20){nodes{number}}
         commits(last:1){nodes{commit{statusCheckRollup{
           state
@@ -86,52 +88,6 @@ pub fn rate_limit_until(status: u16, retry_after: Option<u64>, reset_epoch: Opti
         return Some(reset.unwrap_or_else(|| SystemTime::now() + Duration::from_secs(60)));
     }
     None
-}
-
-/// `(number, extra)` pairs from the PR_EXTRA_QUERY response.
-pub fn parse_pr_extras(value: &serde_json::Value) -> Vec<(u64, PrExtra)> {
-    let Some(nodes) = value.pointer("/data/repository/pullRequests/nodes").and_then(|n| n.as_array()) else {
-        return Vec::new();
-    };
-    nodes
-        .iter()
-        .filter_map(|n| {
-            let number = n.get("number")?.as_u64()?;
-            let text = |k: &str| n.get(k).and_then(|v| v.as_str()).map(str::to_string);
-            let closes = n
-                .pointer("/closingIssuesReferences/nodes")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|i| i.get("number").and_then(|x| x.as_u64())).collect())
-                .unwrap_or_default();
-            let checks = n.pointer("/commits/nodes/0/commit/statusCheckRollup").filter(|r| !r.is_null()).map(|rollup| {
-                let contexts = rollup.pointer("/contexts/nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                let mut failed = 0;
-                let mut pending = 0;
-                for c in &contexts {
-                    let s = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                    match s("__typename") {
-                        "CheckRun" => match (s("status"), s("conclusion")) {
-                            ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => {}
-                            ("COMPLETED", _) => failed += 1,
-                            _ => pending += 1,
-                        },
-                        _ => match s("state") {
-                            "SUCCESS" => {}
-                            "PENDING" | "EXPECTED" => pending += 1,
-                            _ => failed += 1,
-                        },
-                    }
-                }
-                Checks {
-                    state: rollup.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    total: rollup.pointer("/contexts/totalCount").and_then(|v| v.as_u64()).unwrap_or(contexts.len() as u64) as usize,
-                    failed,
-                    pending,
-                }
-            });
-            Some((number, PrExtra { review: text("reviewDecision"), mergeable: text("mergeable"), checks, closes }))
-        })
-        .collect()
 }
 
 /// The `rel="next"` URL from a `Link` header.
@@ -262,21 +218,35 @@ impl Client {
         Ok(value)
     }
 
-    /// Fill `extra` on open PRs from GraphQL when possible; body-parsed closing refs otherwise.
+    /// Fill `extra` on open PRs: GraphQL when possible; otherwise body-parsed closing refs
+    /// plus a REST reviews lookup for the current branch's PR only (one extra request, so
+    /// the unauthenticated 60/hour budget survives).
     fn enrich_prs(&mut self, repo: &RepoRef, prs: &mut [PullRequest]) {
         for p in prs.iter_mut() {
             p.extra.closes = p.body.as_deref().map(closing_refs).unwrap_or_default();
         }
-        if !self.authenticated() || !prs.iter().any(|p| p.is_open()) {
+        if !prs.iter().any(|p| p.is_open()) {
             return;
         }
         let vars = serde_json::json!({ "owner": repo.owner, "name": repo.name });
-        let Ok(value) = self.graphql(PR_EXTRA_QUERY, vars) else { return };
-        let extras = parse_pr_extras(&value);
-        for p in prs.iter_mut() {
-            if let Some(extra) = extras.iter().find(|(n, _)| *n == p.number).map(|(_, e)| e.clone()) {
-                let closes = if extra.closes.is_empty() { std::mem::take(&mut p.extra.closes) } else { extra.closes.clone() };
-                p.extra = PrExtra { closes, ..extra };
+        let graphql = if self.authenticated() { self.graphql(PR_EXTRA_QUERY, vars).ok() } else { None };
+        if let Some(value) = graphql {
+            let mut extras: HashMap<u64, PrExtra> = PrExtra::from_graphql(&value).into_iter().collect();
+            for p in prs.iter_mut() {
+                if let Some(mut extra) = extras.remove(&p.number) {
+                    if extra.closes.is_empty() {
+                        extra.closes = std::mem::take(&mut p.extra.closes);
+                    }
+                    p.extra = extra;
+                }
+            }
+            return;
+        }
+        let Some(branch) = repo.branch.as_deref() else { return };
+        if let Some(p) = prs.iter_mut().find(|p| p.is_open() && p.head.name == branch) {
+            let url = format!("{API}/repos/{}/{}/pulls/{}/reviews?per_page=100", repo.owner, repo.name, p.number);
+            if let Ok(page) = self.get::<Vec<Review>>(&url, None) {
+                p.extra.review = review_decision(&page.items.unwrap_or_default());
             }
         }
     }
@@ -310,31 +280,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_link, parse_pr_extras, rate_limit_until};
-
-    #[test]
-    fn summarizes_graphql_pr_extras() {
-        let v: serde_json::Value = serde_json::from_str(r#"{"data":{"repository":{"pullRequests":{"nodes":[
-          {"number":10,"reviewDecision":"APPROVED","mergeable":"MERGEABLE",
-           "closingIssuesReferences":{"nodes":[{"number":1},{"number":2}]},
-           "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":3,"nodes":[
-             {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
-             {"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null},
-             {"__typename":"StatusContext","state":"FAILURE"}]}}}}]}},
-          {"number":11,"reviewDecision":null,"mergeable":"UNKNOWN","closingIssuesReferences":{"nodes":[]},
-           "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
-        ]}}}}"#).unwrap();
-        let extras = parse_pr_extras(&v);
-        assert_eq!(extras.len(), 2);
-        let (n, e) = &extras[0];
-        assert_eq!(*n, 10);
-        assert_eq!(e.review.as_deref(), Some("APPROVED"));
-        assert_eq!(e.closes, vec![1, 2]);
-        let c = e.checks.as_ref().unwrap();
-        assert_eq!((c.state.as_str(), c.total, c.failed, c.pending), ("FAILURE", 3, 1, 1));
-        assert!(extras[1].1.checks.is_none() && extras[1].1.review.is_none());
-        assert!(parse_pr_extras(&serde_json::json!({})).is_empty());
-    }
+    use super::{next_link, rate_limit_until};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]

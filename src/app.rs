@@ -362,7 +362,7 @@ mod tests {
             }],
             issues: (2..=7).map(|n| issue(n, Some(1))).chain([issue(8, None)]).collect(),
             prs: vec![PullRequest { number: 11, title: "Scaffold the plugin".into(), state: "open".into(), draft: true,
-                merged_at: None, closed_at: None, head: GitRef { name: "b".into(), sha: String::new() }, base: GitRef { name: "main".into(), sha: String::new() },
+                merged_at: None, closed_at: None, head: GitRef { name: "b".into(), sha: String::new(), repo: None }, base: GitRef { name: "main".into(), sha: String::new(), repo: None },
                 user: None, updated_at: String::new(), html_url: "https://p/11".into(), body: None, extra: Default::default() }],
             fetched_at: SystemTime::now(),
             rate_remaining: Some(4999),
@@ -503,6 +503,8 @@ mod tests {
         assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)));
         app.handle_msg(Msg::Agents(vec![AgentInfo { pane_id: "w7:p1".into(), agent: "claude".into(), status: "working".into(), title: None }]));
         assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Agent(_))));
-        assert!(!app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)));
+        assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)), "no branch work: still nothing in progress");
+        let text = texts(&body_lines(&app, 26));
+        assert!(text[0].ends_with("1 busy"), "{:?}", text[0]);
     }
 }
