@@ -85,7 +85,11 @@ pub enum NodeKind {
         elapsed: Option<u64>,
     },
     Check(CheckRun),
-    Event(Event),
+    /// An activity event with its age in seconds at flatten time.
+    Event {
+        event: Event,
+        age: u64,
+    },
     /// A dim informational line.
     Info(String),
 }
@@ -434,7 +438,10 @@ pub fn flatten(
                 depth: 1,
                 expandable: None,
                 url: e.url.clone(),
-                kind: NodeKind::Event(e.clone()),
+                kind: NodeKind::Event {
+                    event: e.clone(),
+                    age: now.saturating_sub(e.at),
+                },
             });
         }
         if events.is_empty() {
@@ -855,7 +862,7 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
                 Span::styled(name, Style::default().fg(Color::DarkGray)),
             ])
         }
-        NodeKind::Event(e) => {
+        NodeKind::Event { event: e, age } => {
             let (icon, color) = match &e.kind {
                 Kind::IssueOpened
                 | Kind::IssueReopened
@@ -867,16 +874,19 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
                 Kind::PrClosed => ("⊘", Color::DarkGray),
                 Kind::PrReview(d) if d == "APPROVED" => ("A", Color::Green),
                 Kind::PrReview(_) => ("C", Color::Red),
-                Kind::RunStarted => ("◐", Color::Cyan),
-                Kind::RunFinished(c) if c == "success" => ("✓", Color::Green),
-                Kind::RunFinished(_) => ("✗", Color::Red),
+                Kind::RunStarted => run_icon("in_progress", None),
+                Kind::RunFinished(c) => run_icon("completed", Some(c)),
             };
-            let age = fmt_duration(now_secs().saturating_sub(e.at));
+            let age = fmt_duration(*age);
             let pre = " ".repeat(node.depth);
-            let verb = e.verb();
-            let label_w = w.saturating_sub(pre.len() + 2 + verb.len() + 1 + age.len() + 1);
-            let label = truncate(&e.label, label_w.max(3));
-            let width = pre.len() + 2 + label.chars().count() + 1 + verb.len();
+            // Reserve icon, spaces, age, and a 3-column label; the verb takes the rest.
+            let fixed = pre.len() + 2 + 1 + 1 + age.len();
+            let verb = truncate(&e.verb(), w.saturating_sub(fixed + 3).max(1));
+            let label = truncate(
+                &e.label,
+                w.saturating_sub(fixed + verb.chars().count()).max(1),
+            );
+            let width = pre.len() + 2 + label.chars().count() + 1 + verb.chars().count();
             right_count(
                 vec![
                     Span::raw(pre),
@@ -1267,7 +1277,6 @@ mod tests {
             kind,
             target: crate::activity::Target::Issue(k as u64),
             label: format!("#{k}"),
-            title: String::new(),
             url: Some(format!("https://e/{k}")),
         };
         let mut events: Vec<Event> = (0..12).map(|k| ev(k, Kind::IssueClosed)).collect();
@@ -1284,6 +1293,22 @@ mod tests {
         assert!(t[a + 2].contains("A #1 approved"), "{:?}", t[a + 2]);
         assert_eq!(nodes[a + 1].url.as_deref(), Some("https://e/0"));
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
+        // Long verb + hour-old age still fits exactly.
+        let old = vec![Event {
+            at: NOW - 4800,
+            kind: Kind::RunFinished("action_required".into()),
+            target: crate::activity::Target::Run(1),
+            label: "Continuous Integration".into(),
+            url: None,
+        }];
+        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &old);
+        let t = texts(&nodes, 26);
+        let row = &t[nodes.iter().position(|n| n.id == NodeId::Event(0)).unwrap()];
+        assert_eq!(row.chars().count(), 26, "{row:?}");
+        assert!(
+            row.ends_with("1h20m") && row.contains("action req."),
+            "{row:?}"
+        );
     }
 
     #[test]

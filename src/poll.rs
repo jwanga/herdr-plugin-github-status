@@ -149,7 +149,8 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
                     last_fetch = Some(Instant::now());
                     last_fast = last_fetch;
                     want_fetch = false;
-                    Some(match client.fetch_snapshot(r) {
+                    let previous_runs = latest.as_ref().map(|s| s.runs.as_slice());
+                    Some(match client.fetch_snapshot(r, previous_runs) {
                         Ok(s) => {
                             latest = Some(s.clone());
                             Msg::Snapshot(Box::new(s))

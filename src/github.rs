@@ -10,7 +10,7 @@ use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -43,13 +43,13 @@ pub const RUNS_LIMIT: usize = 15;
 /// Open PR heads whose check runs are fetched per refresh (authenticated).
 const CHECKS_PR_LIMIT: usize = 5;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RunsPage {
     #[serde(default)]
     workflow_runs: Vec<WorkflowRun>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct CheckRunsPage {
     #[serde(default)]
     check_runs: Vec<CheckRun>,
@@ -98,10 +98,32 @@ impl std::error::Error for RateLimited {}
 pub struct Page<T> {
     /// `None` on a 304 Not Modified.
     pub items: Option<T>,
-    /// Feeds the conditional-request cache (issue #6).
-    #[allow(dead_code)]
     pub etag: Option<String>,
     pub next: Option<String>,
+}
+
+/// What a conditional GET resolved to.
+#[derive(Debug, PartialEq)]
+pub enum Resolved {
+    /// A 200 with its body and (maybe) ETag.
+    Fresh(serde_json::Value, Option<String>),
+    /// A 304 answered from the cache.
+    Cached(String),
+    /// A 304 with nothing cached (cannot happen when `If-None-Match` came from the cache).
+    Empty,
+}
+
+/// Pure decision for `get_cached`: fresh items win; else fall back to the cached body.
+pub fn resolve_page(
+    items: Option<serde_json::Value>,
+    etag: Option<String>,
+    cached: Option<&str>,
+) -> Resolved {
+    match (items, cached) {
+        (Some(v), _) => Resolved::Fresh(v, etag),
+        (None, Some(body)) => Resolved::Cached(body.to_string()),
+        (None, None) => Resolved::Empty,
+    }
 }
 
 /// Head SHAs whose check runs are worth fetching: the current branch's open PR first, then
@@ -196,35 +218,35 @@ impl Client {
     }
 
     /// A conditional GET through the ETag cache: sends `If-None-Match`, reuses the cached
-    /// body on 304 (free of rate limit), stores the body on 200. Returns the items and
-    /// whether the resource changed.
-    pub fn get_cached<T: DeserializeOwned>(
+    /// body on 304 (free of rate limit when authenticated), stores a compact re-serialization
+    /// of the parsed value on 200. A cached body that no longer decodes (a model changed
+    /// across an upgrade) is evicted and fetched fresh.
+    pub fn get_cached<T: DeserializeOwned + Serialize>(
         &mut self,
         url: &str,
-    ) -> Result<(Option<T>, bool, Option<String>)> {
+    ) -> Result<(Option<T>, Option<String>)> {
         let etag = self.cache.etag(url).map(str::to_string);
-        let mut page: Page<serde_json::Value> = self.get(url, etag.as_deref())?;
-        let changed = page.items.is_some();
-        let body = match page.items.take() {
-            Some(value) => {
-                let text = value.to_string();
-                if let Some(e) = page.etag.clone() {
-                    self.cache.store(url, e, text.clone());
+        let page: Page<serde_json::Value> = self.get(url, etag.as_deref())?;
+        match resolve_page(page.items, page.etag, self.cache.body(url)) {
+            Resolved::Fresh(value, etag) => {
+                let items: T = serde_json::from_value(value).context("decoding JSON")?;
+                if let Some(e) = etag {
+                    if let Ok(compact) = serde_json::to_string(&items) {
+                        self.cache.store(url, e, compact);
+                    }
                 }
-                Some(text)
+                Ok((Some(items), page.next))
             }
-            None => self.cache.body(url).map(str::to_string),
-        };
-        let items = match body {
-            Some(text) => Some(serde_json::from_str::<T>(&text).context("decoding cached JSON")?),
-            None => None,
-        };
-        Ok((items, changed, page.next))
-    }
-
-    /// Persist the ETag cache (no-op unless it changed).
-    pub fn save_cache(&mut self) {
-        self.cache.save();
+            Resolved::Cached(text) => match serde_json::from_str::<T>(&text) {
+                Ok(items) => Ok((Some(items), page.next)),
+                Err(_) => {
+                    self.cache.remove(url);
+                    let page: Page<T> = self.get(url, None)?;
+                    Ok((page.items, page.next))
+                }
+            },
+            Resolved::Empty => Ok((None, page.next)),
+        }
     }
 
     pub fn authenticated(&self) -> bool {
@@ -313,7 +335,11 @@ impl Client {
     }
 
     /// Follow `Link: rel="next"` up to `max_pages` pages.
-    pub fn get_all<T: DeserializeOwned>(&mut self, url: &str, max_pages: usize) -> Result<Vec<T>> {
+    pub fn get_all<T: DeserializeOwned + Serialize>(
+        &mut self,
+        url: &str,
+        max_pages: usize,
+    ) -> Result<Vec<T>> {
         let mut out = Vec::new();
         let mut next = Some(url.to_string());
         let mut pages = 0;
@@ -321,7 +347,7 @@ impl Client {
             if pages >= max_pages {
                 break;
             }
-            let (items, _changed, page_next) = self.get_cached::<Vec<T>>(&u)?;
+            let (items, page_next) = self.get_cached::<Vec<T>>(&u)?;
             out.extend(items.unwrap_or_default());
             next = page_next;
             pages += 1;
@@ -425,7 +451,7 @@ impl Client {
             repo.owner, repo.name
         );
         match self.get_cached::<RunsPage>(&url) {
-            Ok((items, _, _)) => Ok(Some(items.map(|p| p.workflow_runs).unwrap_or_default())),
+            Ok((items, _)) => Ok(Some(items.map(|p| p.workflow_runs).unwrap_or_default())),
             Err(e) if e.downcast_ref::<RateLimited>().is_some() => Err(e),
             Err(_) => Ok(None),
         }
@@ -446,7 +472,7 @@ impl Client {
                 repo.owner, repo.name
             );
             match self.get_cached::<CheckRunsPage>(&url) {
-                Ok((items, _, _)) => {
+                Ok((items, _)) => {
                     out.insert(sha, items.map(|p| p.check_runs).unwrap_or_default());
                 }
                 Err(e) if e.downcast_ref::<RateLimited>().is_some() => return Err(e),
@@ -474,7 +500,14 @@ impl Client {
         Ok(())
     }
 
-    pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
+    /// `previous_runs` is kept when the runs fetch fails transiently, so the activity feed
+    /// does not see every run vanish and reappear.
+    pub fn fetch_snapshot(
+        &mut self,
+        repo: &RepoRef,
+        previous_runs: Option<&[WorkflowRun]>,
+    ) -> Result<Snapshot> {
+        self.cache.begin();
         let base = format!("{API}/repos/{}/{}", repo.owner, repo.name);
         let milestones: Vec<Milestone> =
             self.get_all(&format!("{base}/milestones?state=all&per_page=100"), 2)?;
@@ -491,9 +524,13 @@ impl Client {
             1,
         )?;
         self.enrich_prs(repo, &mut prs);
-        let runs = self.fetch_runs(repo)?.unwrap_or_default();
+        let runs = self
+            .fetch_runs(repo)?
+            .or_else(|| previous_runs.map(<[WorkflowRun]>::to_vec))
+            .unwrap_or_default();
         let checks = self.fetch_checks(repo, &mut prs)?;
-        self.save_cache();
+        self.cache.sweep();
+        self.cache.save();
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
@@ -510,7 +547,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_heads, next_link, rate_limit_until};
+    use super::{check_heads, next_link, rate_limit_until, resolve_page, Resolved};
     use crate::model::{GitRef, PrExtra, PullRequest};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -538,6 +575,20 @@ mod tests {
             body: None,
             extra: PrExtra::default(),
         }
+    }
+
+    #[test]
+    fn conditional_get_resolution() {
+        let v = serde_json::json!([1, 2]);
+        assert_eq!(
+            resolve_page(Some(v.clone()), Some("e".into()), Some("old")),
+            Resolved::Fresh(v, Some("e".into()))
+        );
+        assert_eq!(
+            resolve_page(None, Some("e".into()), Some("[1]")),
+            Resolved::Cached("[1]".into())
+        );
+        assert_eq!(resolve_page(None, None, None), Resolved::Empty);
     }
 
     #[test]

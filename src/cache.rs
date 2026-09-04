@@ -20,6 +20,8 @@ pub struct EtagCache {
     entries: HashMap<String, Entry>,
     path: Option<PathBuf>,
     dirty: bool,
+    /// URLs used since `begin()`; `sweep()` evicts the rest.
+    touched: std::collections::HashSet<String>,
 }
 
 impl EtagCache {
@@ -35,11 +37,35 @@ impl EtagCache {
             entries,
             path,
             dirty: false,
+            touched: Default::default(),
         }
     }
 
-    pub fn etag(&self, url: &str) -> Option<&str> {
+    pub fn etag(&mut self, url: &str) -> Option<&str> {
+        self.touched.insert(url.to_string());
         self.entries.get(url).map(|e| e.etag.as_str())
+    }
+
+    /// Forget one entry (a cached body that no longer decodes).
+    pub fn remove(&mut self, url: &str) {
+        if self.entries.remove(url).is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Start a fetch cycle: entries not looked up before the next `sweep()` are stale.
+    pub fn begin(&mut self) {
+        self.touched.clear();
+    }
+
+    /// Drop entries not used during this cycle (old check-run SHAs, previous repos).
+    pub fn sweep(&mut self) {
+        let before = self.entries.len();
+        let touched = std::mem::take(&mut self.touched);
+        self.entries.retain(|url, _| touched.contains(url));
+        if self.entries.len() != before {
+            self.dirty = true;
+        }
     }
 
     pub fn body(&self, url: &str) -> Option<&str> {
@@ -108,6 +134,15 @@ mod tests {
         assert_eq!(again.body("u1"), Some("b1"));
         again.store("u1", "e2".into(), "b2".into());
         assert_eq!(again.body("u1"), Some("b2"));
+        // A cycle that only touches u2 evicts u1.
+        again.store("u2", "e".into(), "b".into());
+        again.begin();
+        let _ = again.etag("u2");
+        again.sweep();
+        assert_eq!(again.len(), 1);
+        assert!(again.body("u1").is_none());
+        again.remove("u2");
+        assert!(again.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -5,10 +5,10 @@
 #![allow(dead_code)]
 
 use crate::repo::RepoRef;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Milestone {
     pub number: u64,
     pub title: String,
@@ -27,22 +27,22 @@ impl Milestone {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MilestoneRef {
     pub number: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Label {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
     pub login: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -70,12 +70,12 @@ impl Issue {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoShort {
     pub full_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitRef {
     #[serde(rename = "ref")]
     pub name: String,
@@ -216,14 +216,14 @@ pub fn review_decision(reviews: &[Review]) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Review {
     pub state: String,
     #[serde(default)]
     pub user: Option<User>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
@@ -281,7 +281,7 @@ pub fn closing_refs(body: &str) -> Vec<u64> {
 }
 
 /// A GitHub Actions workflow run.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
@@ -318,7 +318,7 @@ impl WorkflowRun {
 }
 
 /// A check run on a commit (one job of a workflow, or an external app's check).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CheckRun {
     pub id: u64,
     pub name: String,

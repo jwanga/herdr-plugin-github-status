@@ -55,6 +55,8 @@ pub struct App {
     pub agents: Vec<AgentInfo>,
     /// Latest detected transitions, newest first (at most `MAX_EVENTS`).
     pub events: Vec<activity::Event>,
+    /// `owner/name` the feed belongs to; a different repository resets it.
+    pub events_repo: Option<String>,
     /// Nodes changed recently, with the time of the change, for the highlight.
     pub recent: HashMap<NodeId, u64>,
     /// Visible tree nodes, rebuilt when the snapshot or expansion state changes.
@@ -76,6 +78,7 @@ impl App {
             tree: TreeState::default(),
             agents: Vec::new(),
             events: Vec::new(),
+            events_repo: None,
             recent: HashMap::new(),
             nodes: Vec::new(),
             cursor: 0,
@@ -275,7 +278,17 @@ impl App {
         match msg {
             Msg::Snapshot(s) => {
                 let now = tree::now_secs();
-                if let Some(prev) = self.snapshot.as_ref().filter(|p| p.repo == s.repo) {
+                let name = s.repo.full_name();
+                if self.events_repo.as_deref() != Some(name.as_str()) {
+                    self.events.clear();
+                    self.recent.clear();
+                    self.events_repo = Some(name);
+                }
+                if let Some(prev) = self
+                    .snapshot
+                    .as_ref()
+                    .filter(|p| p.repo.full_name() == s.repo.full_name())
+                {
                     let mut fresh = activity::diff(prev, &s, now);
                     for e in &fresh {
                         for id in target_nodes(&e.target) {
@@ -286,9 +299,6 @@ impl App {
                     fresh.append(&mut self.events);
                     self.events = fresh;
                     self.events.truncate(MAX_EVENTS);
-                } else if self.snapshot.as_ref().is_some_and(|p| p.repo != s.repo) {
-                    self.events.clear();
-                    self.recent.clear();
                 }
                 self.recent
                     .retain(|_, t| now.saturating_sub(*t) <= RECENT_WINDOW_SECS);
@@ -300,7 +310,11 @@ impl App {
                 self.status = Status::NoRepo(cwd);
             }
             Msg::Error { repo, message } => {
-                if self.snapshot.as_ref().is_some_and(|s| s.repo != repo) {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.repo.full_name() != repo.full_name())
+                {
                     self.snapshot = None;
                 }
                 self.status = Status::Error(message);
@@ -708,7 +722,12 @@ mod tests {
             .iter()
             .any(|n| matches!(n.id, NodeId::Section(Section::Activity))));
         assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Event(_))));
-        // A different repository resets the feed.
+        // A branch checkout keeps the feed; a different repository (even via NoRepo) resets it.
+        let mut branched = app.snapshot.clone().unwrap();
+        branched.repo.branch = Some("issue-7-x".into());
+        app.handle_msg(Msg::Snapshot(Box::new(branched)));
+        assert_eq!(app.events.len(), 2);
+        app.handle_msg(Msg::NoRepo("/tmp".into()));
         let mut other = snapshot();
         other.repo.name = "elsewhere".into();
         app.handle_msg(Msg::Snapshot(Box::new(other)));
