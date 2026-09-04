@@ -22,15 +22,12 @@ pub fn right_count(
 }
 
 pub fn age_string(t: SystemTime) -> String {
-    let secs = SystemTime::now()
-        .duration_since(t)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        _ => format!("{}h", secs / 3600),
-    }
+    fmt_duration(
+        SystemTime::now()
+            .duration_since(t)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
 }
 
 /// Compact duration: `45s`, `3m`, `1h20m`, `2d`.

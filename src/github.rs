@@ -101,6 +101,27 @@ pub struct Page<T> {
     pub next: Option<String>,
 }
 
+/// Head SHAs whose check runs are worth fetching: the current branch's open PR first, then
+/// the most recently updated open PRs, at most `CHECKS_PR_LIMIT`; only the current branch's
+/// PR when unauthenticated (the 60/hour budget).
+pub fn check_heads(prs: &[PullRequest], branch: Option<&str>, authenticated: bool) -> Vec<String> {
+    let is_current = |p: &PullRequest| branch.is_some_and(|b| p.head.name == b);
+    let mut open: Vec<&PullRequest> = prs
+        .iter()
+        .filter(|p| p.is_open() && !p.head.sha.is_empty())
+        .filter(|p| authenticated || is_current(p))
+        .collect();
+    open.sort_by_key(|p| !is_current(p)); // stable: current branch first, updated-desc after
+    let mut seen = std::collections::HashSet::new();
+    let mut heads: Vec<String> = open
+        .into_iter()
+        .map(|p| p.head.sha.clone())
+        .filter(|s| seen.insert(s.clone()))
+        .collect();
+    heads.truncate(CHECKS_PR_LIMIT);
+    heads
+}
+
 /// When to retry after a 403/429: `Retry-After` seconds (secondary limit), else the primary
 /// limit's reset time when the remaining budget is exhausted, else `None` (a plain 403).
 pub fn rate_limit_until(
@@ -336,43 +357,42 @@ impl Client {
         }
     }
 
-    /// Check runs for open PR heads (the current branch's PR first), filling a missing
-    /// `extra.checks` from them. Failures leave that head out of the map.
+    /// The latest workflow runs. A rate limit propagates; any other failure yields `None`
+    /// so the caller can keep what it had.
+    fn fetch_runs(&mut self, repo: &RepoRef) -> Result<Option<Vec<WorkflowRun>>> {
+        let url = format!(
+            "{API}/repos/{}/{}/actions/runs?per_page={RUNS_LIMIT}",
+            repo.owner, repo.name
+        );
+        match self.get::<RunsPage>(&url, None) {
+            Ok(page) => Ok(Some(
+                page.items.map(|p| p.workflow_runs).unwrap_or_default(),
+            )),
+            Err(e) if e.downcast_ref::<RateLimited>().is_some() => Err(e),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Check runs for the selected open PR heads (see `check_heads`), filling a missing
+    /// `extra.checks` from them. A rate limit propagates; other failures skip that head.
     fn fetch_checks(
         &mut self,
         repo: &RepoRef,
         prs: &mut [PullRequest],
-    ) -> HashMap<String, Vec<CheckRun>> {
-        let branch = repo.branch.as_deref();
-        let mut heads: Vec<String> = prs
-            .iter()
-            .filter(|p| p.is_open())
-            .filter(|p| self.authenticated() || branch.is_some_and(|b| p.head.name == b))
-            .map(|p| p.head.sha.clone())
-            .filter(|sha| !sha.is_empty())
-            .collect();
-        // The current branch's PR first, then the most recently updated ones.
-        if let Some(b) = branch {
-            if let Some(i) = prs
-                .iter()
-                .filter(|p| p.is_open() && !p.head.sha.is_empty())
-                .position(|p| p.head.name == b)
-            {
-                let sha = prs[i].head.sha.clone();
-                heads.retain(|s| *s != sha);
-                heads.insert(0, sha);
-            }
-        }
-        heads.dedup();
-        heads.truncate(CHECKS_PR_LIMIT);
+    ) -> Result<HashMap<String, Vec<CheckRun>>> {
+        let heads = check_heads(prs, repo.branch.as_deref(), self.authenticated());
         let mut out = HashMap::new();
         for sha in heads {
             let url = format!(
                 "{API}/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
                 repo.owner, repo.name
             );
-            if let Ok(page) = self.get::<CheckRunsPage>(&url, None) {
-                out.insert(sha, page.items.map(|p| p.check_runs).unwrap_or_default());
+            match self.get::<CheckRunsPage>(&url, None) {
+                Ok(page) => {
+                    out.insert(sha, page.items.map(|p| p.check_runs).unwrap_or_default());
+                }
+                Err(e) if e.downcast_ref::<RateLimited>().is_some() => return Err(e),
+                Err(_) => {}
             }
         }
         for p in prs.iter_mut() {
@@ -382,7 +402,18 @@ impl Client {
                 }
             }
         }
-        out
+        Ok(out)
+    }
+
+    /// The cheap fast-tick refresh: runs and check runs only, into an existing snapshot.
+    pub fn refresh_runs(&mut self, repo: &RepoRef, snapshot: &mut Snapshot) -> Result<()> {
+        if let Some(runs) = self.fetch_runs(repo)? {
+            snapshot.runs = runs;
+        }
+        snapshot.checks = self.fetch_checks(repo, &mut snapshot.prs)?;
+        snapshot.fetched_at = SystemTime::now();
+        snapshot.rate_remaining = self.rate_remaining;
+        Ok(())
     }
 
     pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
@@ -402,11 +433,8 @@ impl Client {
             1,
         )?;
         self.enrich_prs(repo, &mut prs);
-        let runs = self
-            .get::<RunsPage>(&format!("{base}/actions/runs?per_page={RUNS_LIMIT}"), None)
-            .map(|page| page.items.map(|p| p.workflow_runs).unwrap_or_default())
-            .unwrap_or_default();
-        let checks = self.fetch_checks(repo, &mut prs);
+        let runs = self.fetch_runs(repo)?.unwrap_or_default();
+        let checks = self.fetch_checks(repo, &mut prs)?;
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
@@ -423,8 +451,71 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_link, rate_limit_until};
+    use super::{check_heads, next_link, rate_limit_until};
+    use crate::model::{GitRef, PrExtra, PullRequest};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn pr(number: u64, state: &str, branch: &str, sha: &str) -> PullRequest {
+        PullRequest {
+            number,
+            title: String::new(),
+            state: state.into(),
+            draft: false,
+            merged_at: None,
+            closed_at: None,
+            head: GitRef {
+                name: branch.into(),
+                sha: sha.into(),
+                repo: None,
+            },
+            base: GitRef {
+                name: "main".into(),
+                sha: String::new(),
+                repo: None,
+            },
+            user: None,
+            updated_at: String::new(),
+            html_url: String::new(),
+            body: None,
+            extra: PrExtra::default(),
+        }
+    }
+
+    #[test]
+    fn check_heads_prefers_current_branch_and_dedups() {
+        // updated-desc order as GitHub returns it; a closed PR precedes the current branch's PR.
+        let prs = vec![
+            pr(9, "closed", "old", "s9"),
+            pr(8, "open", "feat-b", "s8"),
+            pr(7, "open", "feat-a", "s7"),
+            pr(6, "open", "feat-b", "s8"),
+            pr(5, "open", "nosha", ""),
+            pr(4, "open", "feat-c", "s4"),
+            pr(3, "open", "feat-d", "s3"),
+            pr(2, "open", "feat-e", "s2"),
+            pr(1, "open", "feat-f", "s1"),
+        ];
+        assert_eq!(
+            check_heads(&prs, Some("feat-a"), true),
+            vec!["s7", "s8", "s4", "s3", "s2"]
+        );
+        assert_eq!(
+            check_heads(&prs, None, true),
+            vec!["s8", "s7", "s4", "s3", "s2"]
+        );
+        assert_eq!(
+            check_heads(&prs, Some("feat-a"), false),
+            vec!["s7"],
+            "unauthenticated: current branch only"
+        );
+        assert!(check_heads(&prs, Some("main"), false).is_empty());
+        assert!(
+            check_heads(&prs, Some("old"), true)
+                .iter()
+                .all(|s| s != "s9"),
+            "closed PRs never qualify"
+        );
+    }
 
     #[test]
     fn rate_limit_backoff_rules() {

@@ -242,16 +242,7 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
             });
         }
         for r in &active_runs {
-            out.push(Node {
-                id: NodeId::NowRun(r.id),
-                depth: 1,
-                expandable: None,
-                url: Some(r.html_url.clone()),
-                kind: NodeKind::Run {
-                    run: (*r).clone(),
-                    elapsed: run_elapsed(r, now),
-                },
-            });
+            out.push(run_node(r, NodeId::NowRun(r.id), now));
         }
         if idle {
             out.push(Node {
@@ -400,16 +391,7 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
         format!("{repo_url}/actions"),
     ) {
         for r in &s.runs {
-            out.push(Node {
-                id: NodeId::Run(r.id),
-                depth: 1,
-                expandable: None,
-                url: Some(r.html_url.clone()),
-                kind: NodeKind::Run {
-                    run: r.clone(),
-                    elapsed: run_elapsed(r, now),
-                },
-            });
+            out.push(run_node(r, NodeId::Run(r.id), now));
         }
         if s.runs.is_empty() {
             out.push(Node {
@@ -462,6 +444,19 @@ fn group(
         kind: NodeKind::Group { label, count },
     });
     open
+}
+
+fn run_node(r: &WorkflowRun, id: NodeId, now: u64) -> Node {
+    Node {
+        id,
+        depth: 1,
+        expandable: None,
+        url: Some(r.html_url.clone()),
+        kind: NodeKind::Run {
+            run: r.clone(),
+            elapsed: run_elapsed(r, now),
+        },
+    }
 }
 
 fn issue_node(i: &Issue, depth: usize, active: Option<u64>) -> Node {

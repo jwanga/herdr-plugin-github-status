@@ -307,8 +307,13 @@ pub struct WorkflowRun {
 }
 
 impl WorkflowRun {
+    /// Not finished (shown in NOW): queued, in progress, or waiting on something.
     pub fn is_active(&self) -> bool {
         self.status != "completed"
+    }
+    /// Actually executing or about to: the only states worth polling faster for.
+    pub fn is_running(&self) -> bool {
+        matches!(self.status.as_str(), "queued" | "in_progress")
     }
 }
 
@@ -388,9 +393,9 @@ impl Snapshot {
     pub fn open_prs(&self) -> usize {
         self.prs.iter().filter(|p| p.is_open()).count()
     }
-    /// Any workflow run still queued or running.
-    pub fn has_active_runs(&self) -> bool {
-        self.runs.iter().any(WorkflowRun::is_active)
+    /// Any workflow run queued or in progress.
+    pub fn has_running_runs(&self) -> bool {
+        self.runs.iter().any(WorkflowRun::is_running)
     }
 }
 

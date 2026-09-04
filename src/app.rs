@@ -20,7 +20,6 @@ use ratatui::Frame;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FOOTER_ROWS: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +268,7 @@ pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let (cmd_tx, msg_rx) = poll::spawn(cwd, POLL_INTERVAL);
+    let (cmd_tx, msg_rx) = poll::spawn(cwd, poll::POLL_INTERVAL);
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut app = App::new(Some(cmd_tx.clone()));

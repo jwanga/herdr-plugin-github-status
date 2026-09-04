@@ -11,15 +11,21 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// How often the followed directory is re-checked.
 pub const CWD_TICK: Duration = Duration::from_secs(2);
-/// Fetch interval while a workflow run is queued or in progress.
+/// Full snapshot interval.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// Runs-only refresh interval while a workflow run is queued or in progress.
 pub const ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
+/// Fast polling stops below this many remaining requests.
+pub const FAST_POLL_MIN_BUDGET: u32 = 500;
 
-/// The fetch interval to use after `snapshot`: faster while runs are active.
-pub fn interval_for(snapshot: Option<&Snapshot>, base: Duration) -> Duration {
-    match snapshot {
-        Some(s) if s.has_active_runs() => ACTIVE_INTERVAL.min(base),
-        _ => base,
-    }
+/// Whether the cheap runs-only refresh should run on the fast cadence: something is
+/// executing, we are authenticated, and the rate budget is not running low.
+pub fn fast_poll_allowed(snapshot: &Snapshot) -> bool {
+    snapshot.has_running_runs()
+        && snapshot.authenticated
+        && snapshot
+            .rate_remaining
+            .is_none_or(|r| r > FAST_POLL_MIN_BUDGET)
 }
 
 pub enum Cmd {
@@ -96,11 +102,12 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
     std::thread::spawn(move || {
         let mut client = Client::new(github::discover_token());
         let mut current: Option<RepoRef> = None;
+        let mut latest: Option<Snapshot> = None;
         let mut last_fetch: Option<Instant> = None;
+        let mut last_fast: Option<Instant> = None;
         let mut blocked_until: Option<SystemTime> = None;
         let mut want_fetch = true;
         let mut agents: Option<Vec<AgentInfo>> = None;
-        let mut current_interval = interval;
         loop {
             if let Some(now_agents) = workspace_agents() {
                 if agents.as_ref() != Some(&now_agents) {
@@ -114,32 +121,49 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
             let detected = repo::detect(&cwd);
             if detected != current {
                 current = detected.clone();
+                latest = None;
                 want_fetch = true;
                 if current.is_none() && msg_tx.send(Msg::NoRepo(cwd.clone())).is_err() {
                     break;
                 }
             }
-            let due = last_fetch.is_none_or(|t| t.elapsed() >= current_interval);
+            let due = last_fetch.is_none_or(|t| t.elapsed() >= interval);
+            let fast_due = latest.as_ref().is_some_and(fast_poll_allowed)
+                && last_fetch.is_some_and(|t| t.elapsed() >= ACTIVE_INTERVAL)
+                && last_fast.is_none_or(|t| t.elapsed() >= ACTIVE_INTERVAL);
             let blocked = blocked_until.is_some_and(|u| SystemTime::now() < u);
             if let Some(r) = &current {
-                if (want_fetch || due) && !blocked {
-                    let msg = match client.fetch_snapshot(r) {
+                let failure = |e: anyhow::Error, blocked_until: &mut Option<SystemTime>| {
+                    if let Some(rl) = e.downcast_ref::<RateLimited>() {
+                        *blocked_until = Some(rl.until);
+                    }
+                    Msg::Error {
+                        repo: r.clone(),
+                        message: format!("{e:#}"),
+                    }
+                };
+                let msg = if (want_fetch || due) && !blocked {
+                    last_fetch = Some(Instant::now());
+                    last_fast = last_fetch;
+                    want_fetch = false;
+                    Some(match client.fetch_snapshot(r) {
                         Ok(s) => {
-                            current_interval = interval_for(Some(&s), interval);
+                            latest = Some(s.clone());
                             Msg::Snapshot(Box::new(s))
                         }
-                        Err(e) => {
-                            if let Some(rl) = e.downcast_ref::<RateLimited>() {
-                                blocked_until = Some(rl.until);
-                            }
-                            Msg::Error {
-                                repo: r.clone(),
-                                message: format!("{e:#}"),
-                            }
-                        }
-                    };
-                    last_fetch = Some(Instant::now());
-                    want_fetch = false;
+                        Err(e) => failure(e, &mut blocked_until),
+                    })
+                } else if fast_due && !blocked {
+                    last_fast = Some(Instant::now());
+                    let snapshot = latest.as_mut().expect("fast_due implies a snapshot");
+                    Some(match client.refresh_runs(r, snapshot) {
+                        Ok(()) => Msg::Snapshot(Box::new(snapshot.clone())),
+                        Err(e) => failure(e, &mut blocked_until),
+                    })
+                } else {
+                    None
+                };
+                if let Some(msg) = msg {
                     if msg_tx.send(msg).is_err() {
                         break;
                     }
@@ -168,9 +192,7 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
-    fn interval_speeds_up_while_runs_are_active() {
-        let base = Duration::from_secs(10);
-        assert_eq!(interval_for(None, base), base);
+    fn fast_polling_only_while_running_authenticated_and_within_budget() {
         let run = |status: &str| WorkflowRun {
             id: 1,
             name: "CI".into(),
@@ -201,13 +223,15 @@ mod tests {
             rate_remaining: None,
             authenticated: true,
         };
-        assert_eq!(interval_for(Some(&s), base), base);
+        assert!(!fast_poll_allowed(&s), "nothing running");
+        s.runs.push(run("waiting"));
+        assert!(!fast_poll_allowed(&s), "waiting on approval is not running");
         s.runs.push(run("in_progress"));
-        assert_eq!(interval_for(Some(&s), base), ACTIVE_INTERVAL);
-        assert_eq!(
-            interval_for(Some(&s), Duration::from_secs(3)),
-            Duration::from_secs(3),
-            "never slower than the base"
-        );
+        assert!(fast_poll_allowed(&s));
+        s.rate_remaining = Some(100);
+        assert!(!fast_poll_allowed(&s), "budget floor");
+        s.rate_remaining = Some(4000);
+        s.authenticated = false;
+        assert!(!fast_poll_allowed(&s), "unauthenticated never fast-polls");
     }
 }

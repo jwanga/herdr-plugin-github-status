@@ -13,7 +13,9 @@ cargo build --release
 herdr plugin link . && herdr plugin action invoke toggle --plugin jwanga.github-status
 
 ## Test
-cargo test
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+
+CI (`.github/workflows/ci.yml`) enforces exactly these three commands on every push and pull request.
 
 ## Deploy
 Tag `vX.Y.Z` (matching `herdr-plugin.toml` and `Cargo.toml`); the release workflow builds and uploads binaries.
