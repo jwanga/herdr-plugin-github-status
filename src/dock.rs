@@ -150,10 +150,12 @@ pub fn snap_width(pane: &str, width: u32) -> Result<u32> {
         .find(|p| p.pane_id == pane)
         .map(|p| p.rect.width)
         .unwrap_or(0);
-    if me_width == width {
+    let (_, total, _) = parent_split(&layout, pane)?;
+    let want = width.min(total.saturating_sub(10)).max(1);
+    if me_width == want {
         Ok(me_width)
     } else {
-        bail!("pane {pane} is {me_width} columns wide after resizing (wanted {width})")
+        bail!("pane {pane} is {me_width} columns wide after resizing (wanted {want})")
     }
 }
 
