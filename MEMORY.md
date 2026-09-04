@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #5 GitHub Actions: workflow runs and check runs (implemented, merging)
-- **Current Branch**: issue-5-actions-runs
+- **Current Issue**: #6 Real-time polling with ETags, change detection, and an activity feed (next)
+- **Current Branch**: main
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -40,6 +40,8 @@
 - [2026-09-04 06:00] @jwanga: Issue #5 gate — accepted defaults: check runs for ≤5 open PR heads when authenticated (current-branch PR only without a token); 5 s polling while any run is queued/in progress; one row per run (icon, workflow, elapsed/duration; branch at ≥36 cols).
 - [2026-09-04 06:40] @jwanga: Issue #5 implemented on `issue-5-actions-runs`: `WorkflowRun`/`CheckRun` models, `Checks::from_check_runs`, `/actions/runs` + `/commits/{sha}/check-runs` fetches, `poll::interval_for` (5 s while active), ACTIONS section + active runs in NOW + check runs under expanded PRs, `run_icon`, `fmt_duration`. Added `.github/workflows/ci.yml` (fmt, clippy -D warnings, test) so the live run transition can be observed; issue #9 now owns `release.yml` + version sync. 35 tests. Verified live: after pushing the branch the pane showed `◐ CI` in NOW and ACTIONS with the elapsed counter ticking (16s → 48s), then `✓ CI 55s` and NOW dropped back to agents only — no manual refresh.
 - [2026-09-04 07:10] @jwanga: PR #15 reviewed by 3 agents (1 Critical: `fetch_checks` indexed the unfiltered PR list with a filtered position; 9 Important) — all auto-fixed (rule #15): pure tested `check_heads` selector with set dedup; fast tick now refreshes only runs + check runs (`Client::refresh_runs`) and only while a run is queued/in progress, authenticated, and >500 requests remain; `RateLimited` from run/check fetches propagates and non-rate-limit failures keep previous runs; `is_running` vs `is_active`; `age_string` via `fmt_duration`; `run_node` helper; `POLL_INTERVAL` moved to poll.rs; CI `--locked`; INSTRUCTIONS Test = fmt+clippy+test; README check-run wording.
+- [2026-09-04 07:30] @jwanga: Issue #5 done — PR #15 merged (verification pass clean apart from an INSTRUCTIONS wording fix); milestone 1 at 5/6.
+- [2026-09-04 07:30] @jwanga: Refreshed architecture diagram (trigger: issue-close #5, diagram type: flowchart)
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
