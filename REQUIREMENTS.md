@@ -22,7 +22,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 
 ### Pane and layout
 - The plugin registers a `[[panes]]` entrypoint with id `status`, title `status`, placement `split`.
-- Opening the pane splits the focused pane to the **right** and sizes the new pane to the herdr sidebar width: `sidebar_width` from `~/.config/herdr/session.json`, else `[ui] sidebar_width` from `config.toml`, else 26 columns.
+- Opening the pane splits the rightmost full-height pane of the tab (the focused pane on ties) to the **right** via `plugin pane open`, then snaps the new pane to the herdr sidebar width with `pane resize`: `sidebar_width` from `~/.config/herdr/session.json`, else 26 columns.
 - The pane keeps its column width when the surrounding tab is resized (re-applies the split ratio).
 - Actions: `open`, `close`, `toggle` (contexts: workspace, pane). Opening is idempotent per tab; toggling closes an existing status pane.
 - The pane never steals focus when opened by a hook; a manual open focuses it.
@@ -67,10 +67,11 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 
 ## Architecture
 - **`herdr-plugin.toml`** — manifest: pane `status`, actions `open`/`close`/`toggle`, event hooks (milestone 2), build step.
-- **`herdr/*.sh`** — thin action/hook shells that call the binary's helper subcommands and the herdr CLI to split, run, resize, and close panes.
+- **`herdr/launch.sh`** — single entrypoint: fixes PATH, finds the binary (`bin/` then `target/release/`), runs the TUI with no arguments or forwards `dock <mode>`; `herdr/pane.sh` is the action wrapper that calls it.
 - **Rust crate `herdr-github-status`** (`src/`):
-  - `main.rs` — CLI: default runs the TUI; helper subcommands (`open-plan`, `find-panes`, `sidebar-width`) used by scripts.
-  - `herdr.rs` — wrapper over `HERDR_BIN_PATH` JSON commands (pane list/layout/resize/rename, agent list).
+  - `main.rs` — CLI: default runs the TUI; `dock <toggle|open|close>` implements the actions; `sidebar-width` prints the target width.
+  - `dock.rs` — dock logic: sidebar width, split-target selection, open + exact-width snap, per-tab detection of existing status panes via `pane process-info`.
+  - `herdr.rs` — wrapper over `HERDR_BIN_PATH` JSON commands (pane list/layout/resize/rename/close, plugin pane open, agent list) with typed errors.
   - `repo.rs` — cwd → owner/repo + branch resolution via git.
   - `github.rs` — REST client (ureq) with ETag cache, rate-limit tracking; fetches milestones, issues, PRs, workflow runs, check runs.
   - `model.rs` — normalized snapshot; diff of consecutive snapshots → activity events.

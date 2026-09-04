@@ -29,10 +29,12 @@ fn main() -> ExitCode {
             println!("{}", dock::sidebar_width());
             Ok(())
         }
-        Some("dock") => {
-            let mode = args.get(1).map(String::as_str).unwrap_or("toggle");
-            dock::run(mode)
-        }
+        Some("dock") => args
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or("toggle")
+            .parse::<dock::Mode>()
+            .and_then(dock::run),
         Some(other) => Err(anyhow::anyhow!(
             "unknown command '{other}'; use: dock <toggle|open|close>, sidebar-width, --version"
         )),

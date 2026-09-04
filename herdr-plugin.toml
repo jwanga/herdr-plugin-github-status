@@ -3,10 +3,11 @@
 # Install:  herdr plugin install jwanga/herdr-plugin-github-status
 # Develop:  cargo build --release && herdr plugin link .
 #
-# The pane command runs the binary by absolute path under $HERDR_PLUGIN_ROOT: pane
+# The pane command runs the launcher by absolute path under $HERDR_PLUGIN_ROOT: pane
 # commands resolve against the pane's cwd (the project), not the plugin root.
-# herdr/launch.sh prefers bin/ (populated by the install-time build step) and falls
-# back to target/release/ for linked checkouts.
+# herdr/launch.sh prefers bin/ and falls back to target/release/, which the interim
+# [[build]] step below produces on `plugin install`. Prebuilt release binaries (into
+# bin/) arrive with the publishing milestone.
 
 id = "jwanga.github-status"
 name = "GitHub Status"
@@ -14,6 +15,9 @@ version = "0.1.0"
 min_herdr_version = "0.8.0"
 platforms = ["macos", "linux"]
 description = "Real-time project status pane: GitHub milestones, issues, pull requests, and Actions, docked on the right at sidebar width."
+
+[[build]]
+command = ["sh", "-c", "export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; cargo build --release"]
 
 [[panes]]
 id = "status"

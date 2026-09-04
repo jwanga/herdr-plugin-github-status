@@ -11,7 +11,7 @@ A [herdr](https://herdr.dev) plugin that docks a real-time **status** pane on th
 ## Installation
 Requires herdr ≥ 0.8.0 and an authenticated GitHub CLI (`gh auth login`), or a `GH_TOKEN` / `GITHUB_TOKEN` environment variable.
 
-From GitHub (prebuilt binary when available, source build otherwise):
+From GitHub (builds from source with `cargo` on install; prebuilt binaries arrive with the publishing milestone):
 
 ```sh
 herdr plugin install jwanga/herdr-plugin-github-status
@@ -44,7 +44,7 @@ The pane docks on the right of the current tab at the same width as herdr's left
 ### Keys
 | Key | Action |
 | --- | --- |
-| `q` / `Ctrl+C` | Close the pane |
+| `q` / `Ctrl+Q` / `Ctrl+C` | Close the pane |
 
 More keys land with each feature; press `?` inside the pane for the live list.
 

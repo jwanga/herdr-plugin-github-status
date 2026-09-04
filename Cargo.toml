@@ -2,6 +2,7 @@
 name = "herdr-github-status"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 description = "herdr plugin pane showing a real-time GitHub project status (milestones, issues, PRs, Actions)"
 license = "MIT"
 repository = "https://github.com/jwanga/herdr-plugin-github-status"

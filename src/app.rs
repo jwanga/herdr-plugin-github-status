@@ -32,8 +32,8 @@ impl App {
             }
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-                KeyCode::Char('c') if ctrl => self.should_quit = true,
+                KeyCode::Char('q' | 'Q') => self.should_quit = true,
+                KeyCode::Char('c' | 'C') if ctrl => self.should_quit = true,
                 _ => {}
             }
         }
@@ -82,7 +82,7 @@ fn draw_body(f: &mut Frame, area: Rect, _app: &App) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![" q".bold(), " quit".dim()]);
+    let line = Line::from(vec![" q".bold(), " quit".dim(), "  ^q".bold(), " close".dim()]);
     f.render_widget(Paragraph::new(line), area);
 }
 

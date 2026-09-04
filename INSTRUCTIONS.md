@@ -19,4 +19,4 @@ cargo test
 Tag `vX.Y.Z` (matching `herdr-plugin.toml` and `Cargo.toml`); the release workflow builds and uploads binaries.
 
 ## Overrides
-- None.
+- This repository is public. Use the GitHub handle `jwanga` for MEMORY.md entries (`@jwanga:`), never the OS username or an email address; commit with the GitHub noreply email (set in this repo's `.git/config`); never write absolute home-directory paths into tracked files.

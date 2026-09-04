@@ -8,18 +8,32 @@ use std::path::Path;
 
 pub const DEFAULT_WIDTH: u32 = 26;
 
-/// Column width for the pane: herdr's live sidebar width from `session.json`, else the
-/// configured `[ui] sidebar_width`, else herdr's default of 26.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Toggle,
+    Open,
+    Close,
+}
+
+impl std::str::FromStr for Mode {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "toggle" => Ok(Mode::Toggle),
+            "open" => Ok(Mode::Open),
+            "close" => Ok(Mode::Close),
+            other => bail!("unknown dock mode '{other}' (toggle | open | close)"),
+        }
+    }
+}
+
+/// Column width for the pane: herdr's live sidebar width from `session.json`, else
+/// herdr's default of 26. (`config.toml`'s `sidebar_width` is only a starting value that
+/// herdr auto-scales, so the session file is the one source of truth while herdr runs.)
 pub fn sidebar_width() -> u32 {
-    let config_dir = herdr_config_dir();
-    std::fs::read_to_string(config_dir.join("session.json"))
+    std::fs::read_to_string(herdr_config_dir().join("session.json"))
         .ok()
         .and_then(|s| parse_session_width(&s))
-        .or_else(|| {
-            std::fs::read_to_string(config_dir.join("config.toml"))
-                .ok()
-                .and_then(|s| parse_config_width(&s))
-        })
         .unwrap_or(DEFAULT_WIDTH)
 }
 
@@ -39,48 +53,14 @@ pub fn parse_session_width(json: &str) -> Option<u32> {
     u32::try_from(width).ok().filter(|w| *w > 0)
 }
 
-/// Minimal TOML scan for `sidebar_width = N` inside `[ui]` (herdr's config is small; a
-/// full TOML parser is not worth a dependency for one integer).
-pub fn parse_config_width(toml: &str) -> Option<u32> {
-    let mut in_ui = false;
-    for raw in toml.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.starts_with('[') {
-            in_ui = line == "[ui]";
-            continue;
-        }
-        if !in_ui {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("sidebar_width") {
-            let rest = rest.trim_start();
-            if let Some(v) = rest.strip_prefix('=') {
-                if let Ok(n) = v.trim().parse::<u32>() {
-                    if n > 0 {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Where to split and at what ratio so the new right pane is `width` columns.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OpenPlan {
-    pub target: String,
-    pub ratio: f64,
-}
-
-/// Pick the rightmost full-height pane (so the status pane becomes a full-height right
-/// column), preferring the focused pane on ties; fall back to the focused pane.
-pub fn open_plan(layout: &Layout, width: u32) -> Result<OpenPlan> {
-    let right_edge = layout.area.x + layout.area.width;
+/// The pane to split so the status pane becomes a full-height right column: the
+/// rightmost full-height pane, preferring the focused pane on ties; else the focused pane.
+pub fn open_target(layout: &Layout) -> Result<String> {
+    let right_edge = layout.area.right();
     let mut candidates: Vec<_> = layout
         .panes
         .iter()
-        .filter(|p| p.rect.x + p.rect.width == right_edge)
+        .filter(|p| p.rect.right() == right_edge)
         .collect();
     candidates.sort_by(|a, b| {
         b.rect
@@ -88,57 +68,93 @@ pub fn open_plan(layout: &Layout, width: u32) -> Result<OpenPlan> {
             .cmp(&a.rect.height)
             .then_with(|| b.focused.cmp(&a.focused))
     });
-    let target = candidates
+    candidates
         .first()
         .copied()
         .or_else(|| layout.panes.iter().find(|p| p.focused))
         .or_else(|| layout.panes.first())
-        .ok_or_else(|| anyhow!("layout has no panes"))?;
-    Ok(OpenPlan {
-        target: target.pane_id.clone(),
-        ratio: ratio_for_right_width(target.rect.width, width),
-    })
+        .map(|p| p.pane_id.clone())
+        .ok_or_else(|| anyhow!("layout has no panes"))
 }
 
-/// Ratio of the *left* pane in a right split of a `total`-column pane such that the
+/// Ratio of the *left* pane in a right split of a `total`-column region such that the
 /// right pane gets `right` columns (herdr gives the first pane floor(total * ratio)).
 pub fn ratio_for_right_width(total: u32, right: u32) -> f64 {
     if total == 0 {
         return 0.5;
     }
     let right = right.min(total.saturating_sub(10)).max(1);
-    let ratio = 1.0 - f64::from(right) / f64::from(total);
     // Nudge up slightly so floor() lands on exactly `total - right` columns.
-    (ratio + 0.0005).clamp(0.05, 0.95)
+    1.0 - f64::from(right) / f64::from(total) + 0.0005
 }
 
-/// Resize `pane` (already opened as a right split) to exactly `width` columns.
-pub fn snap_width(pane: &str, width: u32) -> Result<()> {
-    let layout = herdr::pane_layout(pane)?;
+/// The immediate horizontal split containing `pane` and its left neighbour, as
+/// (left pane, total columns, current ratio).
+fn parent_split(layout: &Layout, pane: &str) -> Result<(String, u32, f64)> {
     let me = layout
         .panes
         .iter()
         .find(|p| p.pane_id == pane)
         .ok_or_else(|| anyhow!("pane {pane} not in its own layout"))?;
-    // The left neighbour sharing our split: the pane whose right edge touches our left edge
-    // on the same rows.
+    // Smallest right-split whose rect ends at our right edge and contains us.
+    let split = layout
+        .splits
+        .iter()
+        .filter(|s| s.direction == "right")
+        .filter(|s| s.rect.right() == me.rect.right() && s.rect.x < me.rect.x)
+        .filter(|s| s.rect.y <= me.rect.y && me.rect.bottom() <= s.rect.bottom())
+        .min_by_key(|s| s.rect.width * s.rect.height)
+        .ok_or_else(|| anyhow!("no enclosing right split for pane {pane}"))?;
     let left = layout
         .panes
         .iter()
-        .filter(|p| p.pane_id != pane && p.rect.x + p.rect.width == me.rect.x)
-        .filter(|p| p.rect.y < me.rect.y + me.rect.height && me.rect.y < p.rect.y + p.rect.height)
+        .filter(|p| p.pane_id != pane && p.rect.right() == me.rect.x)
+        .filter(|p| p.rect.y < me.rect.bottom() && me.rect.y < p.rect.bottom())
         .max_by_key(|p| p.rect.height)
         .ok_or_else(|| anyhow!("no left neighbour for pane {pane}"))?;
-    let total = left.rect.width + me.rect.width;
-    let current = f64::from(left.rect.width) / f64::from(total);
-    let target = ratio_for_right_width(total, width);
-    let delta = target - current;
-    if delta.abs() < 0.0005 {
-        return Ok(());
+    Ok((left.pane_id.clone(), split.rect.width, split.ratio))
+}
+
+/// Resize `pane` (already opened as a right split) to exactly `width` columns, verifying
+/// the result and nudging once more if herdr's rounding landed one column off.
+pub fn snap_width(pane: &str, width: u32) -> Result<u32> {
+    let mut layout = herdr::pane_layout(pane)?;
+    for _ in 0..3 {
+        let me_width = layout
+            .panes
+            .iter()
+            .find(|p| p.pane_id == pane)
+            .map(|p| p.rect.width)
+            .ok_or_else(|| anyhow!("pane {pane} not in its own layout"))?;
+        let (_, total, current) = parent_split(&layout, pane)?;
+        let want = width.min(total.saturating_sub(10)).max(1);
+        if me_width == want {
+            return Ok(me_width);
+        }
+        let target = ratio_for_right_width(total, want);
+        let mut delta = target - current;
+        if delta.abs() < 0.0005 {
+            // Ratio already "right" but the width is off: nudge by one column.
+            delta = if me_width > want { 1.0 } else { -1.0 } / f64::from(total);
+        }
+        // Positive delta = our left edge moves right (pane narrows).
+        let direction = if delta > 0.0 { "right" } else { "left" };
+        if !herdr::pane_resize(pane, direction, delta.abs())? {
+            bail!("herdr refused to resize {pane}");
+        }
+        layout = herdr::pane_layout(pane)?;
     }
-    // Positive delta = our left edge moves right (pane narrows).
-    let direction = if delta > 0.0 { "right" } else { "left" };
-    herdr::pane_resize(pane, direction, delta.abs())
+    let me_width = layout
+        .panes
+        .iter()
+        .find(|p| p.pane_id == pane)
+        .map(|p| p.rect.width)
+        .unwrap_or(0);
+    if me_width == width {
+        Ok(me_width)
+    } else {
+        bail!("pane {pane} is {me_width} columns wide after resizing (wanted {width})")
+    }
 }
 
 /// Context herdr hands an action: the focused workspace/tab/pane.
@@ -208,10 +224,7 @@ pub fn find_status_panes(panes: &[Pane]) -> Result<Vec<Pane>> {
     Ok(found)
 }
 
-pub fn run(mode: &str) -> Result<()> {
-    if !matches!(mode, "toggle" | "open" | "close") {
-        bail!("unknown dock mode '{mode}' (toggle | open | close)");
-    }
+pub fn run(mode: Mode) -> Result<()> {
     let ctx = action_context();
     let ws = ctx
         .workspace_id
@@ -231,30 +244,28 @@ pub fn run(mode: &str) -> Result<()> {
         .tab_id
         .clone()
         .or_else(|| focused.as_ref().map(|p| p.tab_id.clone()));
-    let in_tab: Vec<&Pane> = existing
+    let in_tab: Vec<Pane> = existing
         .iter()
         .filter(|p| tab_id.as_deref().is_none_or(|t| p.tab_id == t))
+        .cloned()
         .collect();
 
     match mode {
-        "close" => {
+        Mode::Close => {
             if existing.is_empty() {
                 println!("close: nothing open in {ws}");
                 return Ok(());
             }
             close_all(&existing)
         }
-        "toggle" if !in_tab.is_empty() => {
-            let targets: Vec<Pane> = in_tab.into_iter().cloned().collect();
-            close_all(&targets)
-        }
-        "open" if !in_tab.is_empty() => {
+        Mode::Toggle if !in_tab.is_empty() => close_all(&in_tab),
+        Mode::Open if !in_tab.is_empty() => {
             let pane = &in_tab[0].pane_id;
             herdr::pane_focus(pane).ok();
             println!("open: already open ({pane}) in {ws}");
             Ok(())
         }
-        _ => open(&ctx, focused.as_ref(), &panes),
+        Mode::Toggle | Mode::Open => open(&ctx, focused.as_ref(), &panes),
     }
 }
 
@@ -278,30 +289,45 @@ fn open(ctx: &ActionContext, focused: Option<&Pane>, panes: &[Pane]) -> Result<(
         bail!("the tab is zoomed; unzoom before opening the status pane");
     }
     let width = sidebar_width();
-    let plan = open_plan(&layout, width)?;
+    let target = open_target(&layout)?;
     // Live cwd of the focused pane beats the launch cwd from the context.
     let cwd = focused
         .and_then(|p| p.foreground_cwd.clone().or_else(|| p.cwd.clone()))
         .or_else(|| ctx.focused_pane_cwd.clone())
         .or_else(|| ctx.workspace_cwd.clone());
     let plugin_id = std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| PLUGIN_ID.to_string());
-    let pane = herdr::plugin_pane_open(&plugin_id, PANE_ENTRYPOINT, &plan.target, cwd.as_deref(), true)
+    let pane = herdr::plugin_pane_open(&plugin_id, PANE_ENTRYPOINT, &target, cwd.as_deref(), true)
         .context("opening plugin pane")?;
     herdr::pane_rename(&pane, PANE_LABEL).ok();
-    if let Err(err) = snap_width(&pane, width) {
-        eprintln!("{BIN_NAME}: opened {pane} but could not snap width: {err:#}");
+    match snap_width(&pane, width) {
+        Ok(cols) => println!("opened {pane} ({cols} cols, split of {target})"),
+        Err(err) => eprintln!("{BIN_NAME}: opened {pane} but could not snap width: {err:#}"),
     }
-    println!("opened {pane} ({width} cols, split of {})", plan.target);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::{LayoutPane, Rect};
+    use crate::herdr::{parse_layout, LayoutPane, Rect};
 
     fn pane(id: &str, x: u32, y: u32, w: u32, h: u32, focused: bool) -> LayoutPane {
         LayoutPane { pane_id: id.into(), focused, rect: Rect { x, y, width: w, height: h } }
+    }
+
+    fn layout(panes: Vec<LayoutPane>) -> Layout {
+        Layout { area: Rect { x: 26, y: 1, width: 215, height: 93 }, panes, splits: vec![], zoomed: false }
+    }
+
+    /// A real `herdr pane layout --pane w7:p1` envelope (herdr 0.8.0): 215 columns split 0.8.
+    const LAYOUT_JSON: &str = r#"{"id":"cli:pane:layout","result":{"layout":{"area":{"height":93,"width":215,"x":26,"y":1},"focused_pane_id":"w7:p1","panes":[{"focused":true,"pane_id":"w7:p1","rect":{"height":93,"width":172,"x":26,"y":1}},{"focused":false,"pane_id":"w7:p3","rect":{"height":93,"width":43,"x":198,"y":1}}],"splits":[{"direction":"right","id":"split_0_root","ratio":0.8,"rect":{"height":93,"width":215,"x":26,"y":1}}],"tab_id":"w7:t1","workspace_id":"w7","zoomed":false},"type":"pane_layout"}}"#;
+
+    #[test]
+    fn mode_parses() {
+        assert_eq!("toggle".parse::<Mode>().unwrap(), Mode::Toggle);
+        assert_eq!("open".parse::<Mode>().unwrap(), Mode::Open);
+        assert_eq!("close".parse::<Mode>().unwrap(), Mode::Close);
+        assert!("nope".parse::<Mode>().is_err());
     }
 
     #[test]
@@ -313,15 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn config_width_parses_only_ui_section() {
-        let toml = "[theme]\nsidebar_width = 99\n[ui]\n# sidebar_width = 30\nsidebar_width = 32 # cols\n";
-        assert_eq!(parse_config_width(toml), Some(32));
-        assert_eq!(parse_config_width("[ui]\n# sidebar_width = 30\n"), None);
-    }
-
-    #[test]
     fn ratio_gives_exact_right_width() {
-        for total in [80u32, 120, 215, 300] {
+        for total in [80u32, 120, 215, 300, 515, 600, 800, 1200] {
             for right in [18u32, 26, 36] {
                 let r = ratio_for_right_width(total, right);
                 let left = (f64::from(total) * r).floor() as u32;
@@ -334,29 +353,34 @@ mod tests {
     }
 
     #[test]
-    fn open_plan_prefers_rightmost_full_height_pane() {
-        let layout = Layout {
-            area: Rect { x: 26, y: 1, width: 215, height: 93 },
-            focused_pane_id: "w1:p1".into(),
-            zoomed: false,
-            panes: vec![
-                pane("w1:p1", 26, 1, 108, 93, true),
-                pane("w1:p2", 134, 1, 107, 46, false),
-                pane("w1:p3", 134, 47, 107, 47, false),
-            ],
-        };
+    fn open_target_prefers_rightmost_full_height_pane() {
+        let l = layout(vec![
+            pane("w1:p1", 26, 1, 108, 93, true),
+            pane("w1:p2", 134, 1, 107, 46, false),
+            pane("w1:p3", 134, 47, 107, 47, false),
+        ]);
         // No full-height pane on the right edge: the tallest right-edge pane wins.
-        let plan = open_plan(&layout, 26).unwrap();
-        assert_eq!(plan.target, "w1:p3");
-        let single = Layout {
-            area: Rect { x: 26, y: 1, width: 215, height: 93 },
-            focused_pane_id: "w1:p1".into(),
-            zoomed: false,
-            panes: vec![pane("w1:p1", 26, 1, 215, 93, true)],
-        };
-        let plan = open_plan(&single, 26).unwrap();
-        assert_eq!(plan.target, "w1:p1");
-        assert_eq!((215.0 * plan.ratio).floor() as u32, 189);
+        assert_eq!(open_target(&l).unwrap(), "w1:p3");
+        let single = layout(vec![pane("w1:p1", 26, 1, 215, 93, true)]);
+        assert_eq!(open_target(&single).unwrap(), "w1:p1");
+        // Ties on height go to the focused pane.
+        let tie = layout(vec![pane("w1:p1", 26, 1, 100, 93, false), pane("w1:p2", 126, 1, 115, 93, true)]);
+        assert_eq!(open_target(&tie).unwrap(), "w1:p2");
+    }
+
+    #[test]
+    fn real_layout_json_parses_and_yields_split_ratio() {
+        let envelope: serde_json::Value = serde_json::from_str(LAYOUT_JSON).unwrap();
+        let l = parse_layout(&envelope["result"]).unwrap();
+        assert_eq!(l.panes.len(), 2);
+        assert_eq!(open_target(&l).unwrap(), "w7:p3");
+        let (left, total, ratio) = parent_split(&l, "w7:p3").unwrap();
+        assert_eq!(left, "w7:p1");
+        assert_eq!(total, 215);
+        assert!((ratio - 0.8).abs() < 1e-9);
+        // Going from 43 to 26 columns needs the split moved right by ~0.08.
+        let delta = ratio_for_right_width(total, 26) - ratio;
+        assert!(delta > 0.0 && ((215.0 * (ratio + delta)).floor() as u32) == 189);
     }
 
     #[test]
