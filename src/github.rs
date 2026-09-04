@@ -1,6 +1,7 @@
 //! GitHub REST + GraphQL client: token discovery, paginated GETs, rate-limit tracking, and
 //! the per-refresh PR enrichment query.
 
+use crate::cache::EtagCache;
 use crate::model::{
     closing_refs, review_decision, CheckRun, Checks, Issue, Milestone, PrExtra, PullRequest,
     Review, Snapshot, WorkflowRun,
@@ -9,7 +10,7 @@ use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -42,13 +43,13 @@ pub const RUNS_LIMIT: usize = 15;
 /// Open PR heads whose check runs are fetched per refresh (authenticated).
 const CHECKS_PR_LIMIT: usize = 5;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RunsPage {
     #[serde(default)]
     workflow_runs: Vec<WorkflowRun>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct CheckRunsPage {
     #[serde(default)]
     check_runs: Vec<CheckRun>,
@@ -58,6 +59,8 @@ pub struct Client {
     agent: Agent,
     token: Option<String>,
     pub rate_remaining: Option<u32>,
+    cache: EtagCache,
+    debug_log: Option<std::path::PathBuf>,
 }
 
 /// `GH_TOKEN` / `GITHUB_TOKEN`, else `gh auth token`.
@@ -95,10 +98,32 @@ impl std::error::Error for RateLimited {}
 pub struct Page<T> {
     /// `None` on a 304 Not Modified.
     pub items: Option<T>,
-    /// Feeds the conditional-request cache (issue #6).
-    #[allow(dead_code)]
     pub etag: Option<String>,
     pub next: Option<String>,
+}
+
+/// What a conditional GET resolved to.
+#[derive(Debug, PartialEq)]
+pub enum Resolved {
+    /// A 200 with its body and (maybe) ETag.
+    Fresh(serde_json::Value, Option<String>),
+    /// A 304 answered from the cache.
+    Cached(String),
+    /// A 304 with nothing cached (cannot happen when `If-None-Match` came from the cache).
+    Empty,
+}
+
+/// Pure decision for `get_cached`: fresh items win; else fall back to the cached body.
+pub fn resolve_page(
+    items: Option<serde_json::Value>,
+    etag: Option<String>,
+    cached: Option<&str>,
+) -> Resolved {
+    match (items, cached) {
+        (Some(v), _) => Resolved::Fresh(v, etag),
+        (None, Some(body)) => Resolved::Cached(body.to_string()),
+        (None, None) => Resolved::Empty,
+    }
 }
 
 /// Head SHAs whose check runs are worth fetching: the current branch's open PR first, then
@@ -154,17 +179,73 @@ pub fn next_link(link: &str) -> Option<String> {
 }
 
 impl Client {
-    pub fn new(token: Option<String>) -> Self {
+    /// `state_dir` (the plugin state directory) hosts the persisted ETag cache and, when
+    /// `HERDR_GITHUB_STATUS_DEBUG` is set, a `debug.log` of request statuses.
+    pub fn new(token: Option<String>, state_dir: Option<&std::path::Path>) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(15)))
             .user_agent(concat!("herdr-github-status/", env!("CARGO_PKG_VERSION")))
             .build();
+        let debug_log = std::env::var("HERDR_GITHUB_STATUS_DEBUG")
+            .ok()
+            .filter(|v| !v.is_empty() && v != "0")
+            .and(state_dir.map(|d| d.join("debug.log")));
         Self {
             agent: Agent::new_with_config(config),
             token,
             rate_remaining: None,
+            cache: EtagCache::open(state_dir),
+            debug_log,
+        }
+    }
+
+    fn log(&self, status: u16, url: &str) {
+        let Some(path) = &self.debug_log else { return };
+        use std::io::Write;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{ts} {status} {url}");
+        }
+    }
+
+    /// A conditional GET through the ETag cache: sends `If-None-Match`, reuses the cached
+    /// body on 304 (free of rate limit when authenticated), stores a compact re-serialization
+    /// of the parsed value on 200. A cached body that no longer decodes (a model changed
+    /// across an upgrade) is evicted and fetched fresh.
+    pub fn get_cached<T: DeserializeOwned + Serialize>(
+        &mut self,
+        url: &str,
+    ) -> Result<(Option<T>, Option<String>)> {
+        let etag = self.cache.etag(url).map(str::to_string);
+        let page: Page<serde_json::Value> = self.get(url, etag.as_deref())?;
+        match resolve_page(page.items, page.etag, self.cache.body(url)) {
+            Resolved::Fresh(value, etag) => {
+                let items: T = serde_json::from_value(value).context("decoding JSON")?;
+                if let Some(e) = etag {
+                    if let Ok(compact) = serde_json::to_string(&items) {
+                        self.cache.store(url, e, compact);
+                    }
+                }
+                Ok((Some(items), page.next))
+            }
+            Resolved::Cached(text) => match serde_json::from_str::<T>(&text) {
+                Ok(items) => Ok((Some(items), page.next)),
+                Err(_) => {
+                    self.cache.remove(url);
+                    let page: Page<T> = self.get(url, None)?;
+                    Ok((page.items, page.next))
+                }
+            },
+            Resolved::Empty => Ok((None, page.next)),
         }
     }
 
@@ -218,6 +299,7 @@ impl Client {
         let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<u64>().ok());
         let remaining = header("x-ratelimit-remaining").and_then(|v| v.parse::<u32>().ok());
         let status = resp.status().as_u16();
+        self.log(status, url);
         let body = resp
             .body_mut()
             .read_to_string()
@@ -253,7 +335,11 @@ impl Client {
     }
 
     /// Follow `Link: rel="next"` up to `max_pages` pages.
-    pub fn get_all<T: DeserializeOwned>(&mut self, url: &str, max_pages: usize) -> Result<Vec<T>> {
+    pub fn get_all<T: DeserializeOwned + Serialize>(
+        &mut self,
+        url: &str,
+        max_pages: usize,
+    ) -> Result<Vec<T>> {
         let mut out = Vec::new();
         let mut next = Some(url.to_string());
         let mut pages = 0;
@@ -261,9 +347,9 @@ impl Client {
             if pages >= max_pages {
                 break;
             }
-            let page: Page<Vec<T>> = self.get(&u, None)?;
-            out.extend(page.items.unwrap_or_default());
-            next = page.next;
+            let (items, page_next) = self.get_cached::<Vec<T>>(&u)?;
+            out.extend(items.unwrap_or_default());
+            next = page_next;
             pages += 1;
         }
         Ok(out)
@@ -364,10 +450,8 @@ impl Client {
             "{API}/repos/{}/{}/actions/runs?per_page={RUNS_LIMIT}",
             repo.owner, repo.name
         );
-        match self.get::<RunsPage>(&url, None) {
-            Ok(page) => Ok(Some(
-                page.items.map(|p| p.workflow_runs).unwrap_or_default(),
-            )),
+        match self.get_cached::<RunsPage>(&url) {
+            Ok((items, _)) => Ok(Some(items.map(|p| p.workflow_runs).unwrap_or_default())),
             Err(e) if e.downcast_ref::<RateLimited>().is_some() => Err(e),
             Err(_) => Ok(None),
         }
@@ -387,9 +471,9 @@ impl Client {
                 "{API}/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
                 repo.owner, repo.name
             );
-            match self.get::<CheckRunsPage>(&url, None) {
-                Ok(page) => {
-                    out.insert(sha, page.items.map(|p| p.check_runs).unwrap_or_default());
+            match self.get_cached::<CheckRunsPage>(&url) {
+                Ok((items, _)) => {
+                    out.insert(sha, items.map(|p| p.check_runs).unwrap_or_default());
                 }
                 Err(e) if e.downcast_ref::<RateLimited>().is_some() => return Err(e),
                 Err(_) => {}
@@ -416,7 +500,18 @@ impl Client {
         Ok(())
     }
 
-    pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
+    /// `previous_runs` is kept when the runs fetch fails transiently, so the activity feed
+    /// does not see every run vanish and reappear.
+    pub fn fetch_snapshot(
+        &mut self,
+        repo: &RepoRef,
+        previous_runs: Option<&[WorkflowRun]>,
+    ) -> Result<Snapshot> {
+        self.cache.begin();
+        let fetch_started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let base = format!("{API}/repos/{}/{}", repo.owner, repo.name);
         let milestones: Vec<Milestone> =
             self.get_all(&format!("{base}/milestones?state=all&per_page=100"), 2)?;
@@ -433,8 +528,13 @@ impl Client {
             1,
         )?;
         self.enrich_prs(repo, &mut prs);
-        let runs = self.fetch_runs(repo)?.unwrap_or_default();
+        let runs = self
+            .fetch_runs(repo)?
+            .or_else(|| previous_runs.map(<[WorkflowRun]>::to_vec))
+            .unwrap_or_default();
         let checks = self.fetch_checks(repo, &mut prs)?;
+        self.cache.sweep();
+        self.cache.save();
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
@@ -442,6 +542,7 @@ impl Client {
             prs,
             runs,
             checks,
+            fetch_started_at,
             fetched_at: SystemTime::now(),
             rate_remaining: self.rate_remaining,
             authenticated: self.authenticated(),
@@ -451,7 +552,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_heads, next_link, rate_limit_until};
+    use super::{check_heads, next_link, rate_limit_until, resolve_page, Resolved};
     use crate::model::{GitRef, PrExtra, PullRequest};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -474,11 +575,26 @@ mod tests {
                 repo: None,
             },
             user: None,
+            created_at: None,
             updated_at: String::new(),
             html_url: String::new(),
             body: None,
             extra: PrExtra::default(),
         }
+    }
+
+    #[test]
+    fn conditional_get_resolution() {
+        let v = serde_json::json!([1, 2]);
+        assert_eq!(
+            resolve_page(Some(v.clone()), Some("e".into()), Some("old")),
+            Resolved::Fresh(v, Some("e".into()))
+        );
+        assert_eq!(
+            resolve_page(None, Some("e".into()), Some("[1]")),
+            Resolved::Cached("[1]".into())
+        );
+        assert_eq!(resolve_page(None, None, None), Resolved::Empty);
     }
 
     #[test]

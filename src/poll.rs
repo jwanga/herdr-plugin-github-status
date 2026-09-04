@@ -100,7 +100,10 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
     std::thread::spawn(move || {
-        let mut client = Client::new(github::discover_token());
+        let state_dir = std::env::var("HERDR_PLUGIN_STATE_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let mut client = Client::new(github::discover_token(), state_dir.as_deref());
         let mut current: Option<RepoRef> = None;
         let mut latest: Option<Snapshot> = None;
         let mut last_fetch: Option<Instant> = None;
@@ -120,8 +123,14 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
             let cwd = live_cwd(&fallback_cwd);
             let detected = repo::detect(&cwd);
             if detected != current {
+                let same_repo = detected
+                    .as_ref()
+                    .zip(current.as_ref())
+                    .is_some_and(|(d, c)| d.full_name() == c.full_name());
                 current = detected.clone();
-                latest = None;
+                if !same_repo {
+                    latest = None;
+                }
                 want_fetch = true;
                 if current.is_none() && msg_tx.send(Msg::NoRepo(cwd.clone())).is_err() {
                     break;
@@ -146,7 +155,8 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
                     last_fetch = Some(Instant::now());
                     last_fast = last_fetch;
                     want_fetch = false;
-                    Some(match client.fetch_snapshot(r) {
+                    let previous_runs = latest.as_ref().map(|s| s.runs.as_slice());
+                    Some(match client.fetch_snapshot(r, previous_runs) {
                         Ok(s) => {
                             latest = Some(s.clone());
                             Msg::Snapshot(Box::new(s))
@@ -219,6 +229,7 @@ mod tests {
             prs: vec![],
             runs: vec![run("completed")],
             checks: Default::default(),
+            fetch_started_at: 0,
             fetched_at: SystemTime::now(),
             rate_remaining: None,
             authenticated: true,

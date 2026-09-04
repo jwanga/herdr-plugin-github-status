@@ -7,6 +7,15 @@ use ratatui::text::{Line, Span};
 
 pub const ROWS: u16 = 2;
 
+/// `4987` → `4.9k`, `312` → `312`.
+pub fn compact_count(n: u32) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn badge() -> Span<'static> {
     Span::styled(
         " status ",
@@ -33,6 +42,17 @@ pub fn lines(app: &App, w: usize) -> Vec<Line<'static>> {
                 age_string(s.fetched_at),
                 Style::default().fg(Color::DarkGray),
             )];
+            if let Some(rate) = s.rate_remaining.filter(|r| w >= 30 || *r < 200) {
+                let color = if rate < 200 {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                };
+                suffix.push(Span::styled(
+                    format!(" {}", compact_count(rate)),
+                    Style::default().fg(color),
+                ));
+            }
             if !s.authenticated {
                 suffix.push(Span::styled(
                     " no-token",

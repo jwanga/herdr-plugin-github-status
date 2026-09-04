@@ -1,6 +1,7 @@
 //! The section tree: sections → groups → milestones → issues, flattened into nodes
 //! according to which nodes are expanded, and rendered per node at a given width.
 
+use crate::activity::{Event, Kind};
 use crate::model::{AgentInfo, CheckRun, Issue, Milestone, PullRequest, Snapshot, WorkflowRun};
 use crate::ui::{fit, fmt_duration, right_count, truncate};
 use crate::util::parse_rfc3339;
@@ -19,6 +20,7 @@ pub enum Section {
     Issues,
     PullRequests,
     Actions,
+    Activity,
 }
 
 impl Section {
@@ -29,6 +31,7 @@ impl Section {
             Section::Issues => "ISSUES",
             Section::PullRequests => "PULL REQUESTS",
             Section::Actions => "ACTIONS",
+            Section::Activity => "ACTIVITY",
         }
     }
 }
@@ -51,6 +54,9 @@ pub enum NodeId {
     Idle,
     NoRuns,
     Run(u64),
+    /// An activity event, keyed by its position from the newest.
+    Event(usize),
+    NoEvents,
     /// A check run under a PR: (pr number, check id).
     PrCheck(u64, u64),
 }
@@ -79,6 +85,11 @@ pub enum NodeKind {
         elapsed: Option<u64>,
     },
     Check(CheckRun),
+    /// An activity event with its age in seconds at flatten time.
+    Event {
+        event: Event,
+        age: u64,
+    },
     /// A dim informational line.
     Info(String),
 }
@@ -185,7 +196,16 @@ pub fn run_elapsed(r: &WorkflowRun, now: u64) -> Option<u64> {
 
 /// Flatten the snapshot into visible nodes for `state`; `now` (Unix seconds) bounds the
 /// recently-closed groups and run durations; `agents` are this workspace's herdr agents.
-pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) -> Vec<Node> {
+/// Activity rows shown when the section is expanded.
+pub const ACTIVITY_ROWS: usize = 10;
+
+pub fn flatten(
+    s: &Snapshot,
+    state: &TreeState,
+    now: u64,
+    agents: &[AgentInfo],
+    events: &[Event],
+) -> Vec<Node> {
     let mut out = Vec::new();
     let repo_url = format!("https://github.com/{}/{}", s.repo.owner, s.repo.name);
     let active = active_issue(s);
@@ -400,6 +420,37 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
                 expandable: None,
                 url: None,
                 kind: NodeKind::Info("no workflow runs".into()),
+            });
+        }
+    }
+
+    // ---- Activity: the latest transitions, newest first.
+    if section(
+        &mut out,
+        state,
+        Section::Activity,
+        events.len().to_string(),
+        format!("{repo_url}/activity"),
+    ) {
+        for (k, e) in events.iter().take(ACTIVITY_ROWS).enumerate() {
+            out.push(Node {
+                id: NodeId::Event(k),
+                depth: 1,
+                expandable: None,
+                url: e.url.clone(),
+                kind: NodeKind::Event {
+                    event: e.clone(),
+                    age: now.saturating_sub(e.at),
+                },
+            });
+        }
+        if events.is_empty() {
+            out.push(Node {
+                id: NodeId::NoEvents,
+                depth: 1,
+                expandable: None,
+                url: None,
+                kind: NodeKind::Info("no changes seen yet".into()),
             });
         }
     }
@@ -811,6 +862,44 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
                 Span::styled(name, Style::default().fg(Color::DarkGray)),
             ])
         }
+        NodeKind::Event { event: e, age } => {
+            let (icon, color) = match &e.kind {
+                Kind::IssueOpened
+                | Kind::IssueReopened
+                | Kind::PrOpened
+                | Kind::PrReady
+                | Kind::MilestoneCreated => ("+", Color::Green),
+                Kind::IssueClosed | Kind::MilestoneClosed => ("✓", Color::Magenta),
+                Kind::PrMerged => ("⭳", Color::Magenta),
+                Kind::PrClosed => ("⊘", Color::DarkGray),
+                Kind::PrReview(d) if d == "APPROVED" => ("A", Color::Green),
+                Kind::PrReview(_) => ("C", Color::Red),
+                Kind::RunStarted => run_icon("in_progress", None),
+                Kind::RunFinished(c) => run_icon("completed", Some(c)),
+            };
+            let age = fmt_duration(*age);
+            let pre = " ".repeat(node.depth);
+            // Reserve icon, spaces, age, and a 3-column label; the verb takes the rest.
+            let fixed = pre.len() + 2 + 1 + 1 + age.len();
+            let verb = truncate(&e.verb(), w.saturating_sub(fixed + 3).max(1));
+            let label = truncate(
+                &e.label,
+                w.saturating_sub(fixed + verb.chars().count()).max(1),
+            );
+            let width = pre.len() + 2 + label.chars().count() + 1 + verb.chars().count();
+            right_count(
+                vec![
+                    Span::raw(pre),
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
+                    Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" "),
+                    Span::styled(verb, Style::default().fg(Color::DarkGray)),
+                ],
+                width,
+                age,
+                w,
+            )
+        }
         NodeKind::Info(text) => {
             let pre = " ".repeat(node.depth);
             Line::from(vec![
@@ -859,6 +948,7 @@ mod tests {
             milestone: milestone.map(|n| MilestoneRef { number: n }),
             labels: vec![],
             assignees: vec![],
+            created_at: None,
             updated_at: String::new(),
             closed_at: closed_at.map(str::to_string),
             html_url: format!("https://i/{number}"),
@@ -887,6 +977,7 @@ mod tests {
                 repo,
             },
             user: None,
+            created_at: None,
             updated_at: String::new(),
             html_url: format!("https://p/{number}"),
             body: None,
@@ -894,7 +985,7 @@ mod tests {
         }
     }
     fn nodes(s: &Snapshot, st: &TreeState, now: u64) -> Vec<Node> {
-        flatten(s, st, now, &[])
+        flatten(s, st, now, &[], &[])
     }
     fn snap() -> Snapshot {
         Snapshot {
@@ -938,6 +1029,7 @@ mod tests {
             prs: vec![pr(20, false), pr(21, true)],
             runs: vec![],
             checks: Default::default(),
+            fetch_started_at: 0,
             fetched_at: SystemTime::now(),
             rate_remaining: None,
             authenticated: true,
@@ -983,7 +1075,9 @@ mod tests {
         assert_eq!(ids[13], &NodeId::Pr(20));
         assert_eq!(ids[15], &NodeId::Section(Section::Actions));
         assert_eq!(ids[16], &NodeId::NoRuns, "no runs placeholder");
-        assert_eq!(ids.len(), 17);
+        assert_eq!(ids[17], &NodeId::Section(Section::Activity));
+        assert_eq!(ids[18], &NodeId::NoEvents);
+        assert_eq!(ids.len(), 19);
         assert!(
             t[3].starts_with(" ▾ First") && t[3].ends_with("1/2"),
             "{:?}",
@@ -1143,7 +1237,7 @@ mod tests {
         s.prs[0].head.sha = "abc".into();
         let mut st = TreeState::default();
         st.toggle(&NodeId::Pr(20));
-        let nodes = flatten(&s, &st, NOW, &[]);
+        let nodes = flatten(&s, &st, NOW, &[], &[]);
         let t = texts(&nodes, 26);
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
         assert!(
@@ -1179,6 +1273,48 @@ mod tests {
     }
 
     #[test]
+    fn activity_rows_render_newest_first_and_fit() {
+        let s = snap();
+        let ev = |k: usize, kind: Kind| Event {
+            at: NOW - 60 * k as u64,
+            kind,
+            target: crate::activity::Target::Issue(k as u64),
+            label: format!("#{k}"),
+            url: Some(format!("https://e/{k}")),
+        };
+        let mut events: Vec<Event> = (0..12).map(|k| ev(k, Kind::IssueClosed)).collect();
+        events[1].kind = Kind::PrReview("APPROVED".into());
+        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &events);
+        let a = nodes
+            .iter()
+            .position(|n| n.id == NodeId::Section(Section::Activity))
+            .unwrap();
+        let t = texts(&nodes, 26);
+        assert!(t[a].ends_with("12"), "{:?}", t[a]);
+        assert_eq!(nodes.len() - a - 1, ACTIVITY_ROWS, "capped rows");
+        assert!(t[a + 1].contains("#0 closed"), "{:?}", t[a + 1]);
+        assert!(t[a + 2].contains("A #1 approved"), "{:?}", t[a + 2]);
+        assert_eq!(nodes[a + 1].url.as_deref(), Some("https://e/0"));
+        assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
+        // Long verb + hour-old age still fits exactly.
+        let old = vec![Event {
+            at: NOW - 4800,
+            kind: Kind::RunFinished("action_required".into()),
+            target: crate::activity::Target::Run(1),
+            label: "Continuous Integration".into(),
+            url: None,
+        }];
+        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &old);
+        let t = texts(&nodes, 26);
+        let row = &t[nodes.iter().position(|n| n.id == NodeId::Event(0)).unwrap()];
+        assert_eq!(row.chars().count(), 26, "{row:?}");
+        assert!(
+            row.ends_with("1h20m") && row.contains("action req."),
+            "{row:?}"
+        );
+    }
+
+    #[test]
     fn run_icons_cover_github_states() {
         assert_eq!(run_icon("queued", None).0, "◌");
         assert_eq!(run_icon("in_progress", None).0, "◐");
@@ -1200,7 +1336,7 @@ mod tests {
             status: "idle".into(),
             title: None,
         }];
-        let nodes = flatten(&s, &TreeState::default(), NOW, &agents);
+        let nodes = flatten(&s, &TreeState::default(), NOW, &agents, &[]);
         let t = texts(&nodes, 26);
         assert!(t[0].ends_with("idle"), "{:?}", t[0]);
         assert_eq!(nodes[1].id, NodeId::Idle);
@@ -1210,7 +1346,7 @@ mod tests {
             .any(|n| matches!(n.id, NodeId::NowPr(_) | NodeId::NowIssue(_))));
         // A branch whose issue is out of view still counts as active.
         s.repo.branch = Some("issue-99-x".into());
-        let nodes = flatten(&s, &TreeState::default(), NOW, &[]);
+        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &[]);
         let t = texts(&nodes, 26);
         assert!(t[0].ends_with("idle"), "no busy agents: {:?}", t[0]);
         assert_eq!(nodes[1].id, NodeId::NowIssue(99));
@@ -1243,7 +1379,7 @@ mod tests {
         }];
         let mut st = TreeState::default();
         st.toggle(&NodeId::Pr(20));
-        let nodes = flatten(&s, &st, NOW, &agents);
+        let nodes = flatten(&s, &st, NOW, &agents, &[]);
         let t = texts(&nodes, 26);
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
         assert!(
@@ -1284,7 +1420,7 @@ mod tests {
             .unwrap();
         assert!(t[g].contains("recently merged"), "{:?}", t[g]);
         st.toggle(&NodeId::RecentPrs);
-        let nodes = flatten(&s, &st, NOW, &agents);
+        let nodes = flatten(&s, &st, NOW, &agents, &[]);
         assert!(nodes.iter().any(|n| n.id == NodeId::Pr(21)));
         let t = texts(&nodes, 26);
         let p21 = nodes.iter().position(|n| n.id == NodeId::Pr(21)).unwrap();

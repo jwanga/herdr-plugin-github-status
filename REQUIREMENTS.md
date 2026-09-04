@@ -42,7 +42,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 
 ### Real-time updates
 - Poll GitHub on a short interval (default 10 s) using conditional requests (ETag / `If-None-Match`) so unchanged resources cost no rate limit; in-progress workflow runs poll faster (default 5 s).
-- Detect state transitions between snapshots (issue opened/closed, PR merged, run started/finished, milestone closed) and surface them: a change marker on the row for a short window and an **Activity** feed of the latest transitions.
+- Detect state transitions between snapshots (issue opened/closed, PR merged, run started/finished, milestone closed) and surface them: a highlight on the row for a short window and an **Activity** feed of the latest transitions.
 - Show last-refresh age and rate-limit remaining in the header; show errors inline without crashing.
 - Manual refresh on `r`.
 
@@ -52,7 +52,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 
 ### Configuration
 - `config.toml` in `HERDR_PLUGIN_CONFIG_DIR` (fallback `herdr plugin config-dir`): `poll_interval_secs`, `active_poll_interval_secs`, `width` (`sidebar` or a column count), `auto_open`, `sections` order/visibility, `recent_window_hours`.
-- Runtime state (ETags, snooze markers) in `HERDR_PLUGIN_STATE_DIR`.
+- Runtime state (ETags with their cached responses, ≤2 MB; snooze markers) in `HERDR_PLUGIN_STATE_DIR`.
 
 ### Packaging and distribution
 - Manifest `herdr-plugin.toml` at the repository root with `id = "jwanga.github-status"`, `name`, `version`, `min_herdr_version = "0.8.0"`, `platforms = ["macos", "linux"]`.
@@ -73,8 +73,10 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
   - `dock.rs` — dock logic: sidebar width, split-target selection, open + exact-width snap, per-tab detection of existing status panes via `pane process-info`.
   - `herdr.rs` — wrapper over `HERDR_BIN_PATH` JSON commands (pane list/layout/resize/rename/close, plugin pane open, agent list) with typed errors.
   - `repo.rs` — cwd → owner/repo + branch resolution via git.
-  - `github.rs` — REST client (ureq) with ETag cache, rate-limit tracking; fetches milestones, issues, PRs, workflow runs, check runs.
-  - `model.rs` — normalized snapshot; diff of consecutive snapshots → activity events.
+  - `github.rs` — REST + GraphQL client (ureq) with conditional requests, rate-limit tracking; fetches milestones, issues, PRs, workflow runs, check runs.
+  - `cache.rs` — ETag cache (etag + compact body per URL) persisted in the state dir, swept per fetch.
+  - `model.rs` — normalized snapshot shapes.
+  - `activity.rs` — diff of consecutive snapshots → activity events.
   - `poll.rs` — background thread scheduling fetches; sends snapshots over a channel.
   - `ui/` — ratatui rendering: header, section tree, activity feed, help overlay; 26-column-aware truncation.
-  - `config.rs` — config file + defaults; state dir persistence.
+  - `config.rs` — config file + defaults.

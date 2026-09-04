@@ -5,10 +5,10 @@
 #![allow(dead_code)]
 
 use crate::repo::RepoRef;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Milestone {
     pub number: u64,
     pub title: String,
@@ -27,22 +27,22 @@ impl Milestone {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MilestoneRef {
     pub number: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Label {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
     pub login: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -55,6 +55,8 @@ pub struct Issue {
     pub labels: Vec<Label>,
     #[serde(default)]
     pub assignees: Vec<User>,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub updated_at: String,
     #[serde(default)]
     pub closed_at: Option<String>,
@@ -70,12 +72,12 @@ impl Issue {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoShort {
     pub full_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitRef {
     #[serde(rename = "ref")]
     pub name: String,
@@ -216,14 +218,14 @@ pub fn review_decision(reviews: &[Review]) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Review {
     pub state: String,
     #[serde(default)]
     pub user: Option<User>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
@@ -238,6 +240,8 @@ pub struct PullRequest {
     pub base: GitRef,
     #[serde(default)]
     pub user: Option<User>,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub updated_at: String,
     pub html_url: String,
     #[serde(default)]
@@ -281,7 +285,7 @@ pub fn closing_refs(body: &str) -> Vec<u64> {
 }
 
 /// A GitHub Actions workflow run.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct WorkflowRun {
     pub id: u64,
     pub name: String,
@@ -318,7 +322,7 @@ impl WorkflowRun {
 }
 
 /// A check run on a commit (one job of a workflow, or an external app's check).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CheckRun {
     pub id: u64,
     pub name: String,
@@ -381,6 +385,8 @@ pub struct Snapshot {
     pub runs: Vec<WorkflowRun>,
     /// Check runs by head SHA for open PRs.
     pub checks: std::collections::HashMap<String, Vec<CheckRun>>,
+    /// Unix seconds when this snapshot's fetch began (bounds "new since last time").
+    pub fetch_started_at: u64,
     pub fetched_at: SystemTime,
     pub rate_remaining: Option<u32>,
     pub authenticated: bool,
