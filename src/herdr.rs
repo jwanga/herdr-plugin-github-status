@@ -19,7 +19,11 @@ pub struct HerdrError {
 
 impl std::fmt::Display for HerdrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "herdr {} failed: {}: {}", self.command, self.code, self.message)
+        write!(
+            f,
+            "herdr {} failed: {}: {}",
+            self.command, self.code, self.message
+        )
     }
 }
 
@@ -230,7 +234,16 @@ pub fn plugin_pane_open(
 /// Returns whether herdr reports the layout changed.
 pub fn pane_resize(pane: &str, direction: &str, amount: f64) -> Result<bool> {
     let amount = format!("{amount:.5}");
-    let result = call(&["pane", "resize", "--pane", pane, "--direction", direction, "--amount", &amount])?;
+    let result = call(&[
+        "pane",
+        "resize",
+        "--pane",
+        pane,
+        "--direction",
+        direction,
+        "--amount",
+        &amount,
+    ])?;
     Ok(result
         .pointer("/resize/changed")
         .and_then(|v| v.as_bool())

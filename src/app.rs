@@ -8,7 +8,8 @@ use crate::ui::{header, help, wrap};
 use crate::util::open_url;
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -19,7 +20,6 @@ use ratatui::Frame;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FOOTER_ROWS: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,9 +113,18 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         let target = if forward {
-            sections.iter().copied().find(|&i| i > self.cursor).or_else(|| sections.first().copied())
+            sections
+                .iter()
+                .copied()
+                .find(|&i| i > self.cursor)
+                .or_else(|| sections.first().copied())
         } else {
-            sections.iter().rev().copied().find(|&i| i < self.cursor).or_else(|| sections.last().copied())
+            sections
+                .iter()
+                .rev()
+                .copied()
+                .find(|&i| i < self.cursor)
+                .or_else(|| sections.last().copied())
         };
         if let Some(t) = target {
             self.set_cursor(t);
@@ -211,7 +220,10 @@ impl App {
         let max = n.saturating_sub(page);
         self.scroll = self.scroll.saturating_add_signed(delta).min(max);
         // Keep the cursor inside the viewport.
-        self.cursor = self.cursor.clamp(self.scroll, self.scroll + page - 1).min(n.saturating_sub(1));
+        self.cursor = self
+            .cursor
+            .clamp(self.scroll, self.scroll + page - 1)
+            .min(n.saturating_sub(1));
     }
 
     /// Click selects the row under the pointer; clicking the selected expandable row toggles it.
@@ -256,7 +268,7 @@ pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let (cmd_tx, msg_rx) = poll::spawn(cwd, POLL_INTERVAL);
+    let (cmd_tx, msg_rx) = poll::spawn(cwd, poll::POLL_INTERVAL);
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut app = App::new(Some(cmd_tx.clone()));
@@ -267,7 +279,11 @@ pub fn run() -> Result<()> {
     result
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App, msg_rx: &Receiver<Msg>) -> Result<()> {
+fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    msg_rx: &Receiver<Msg>,
+) -> Result<()> {
     while !app.should_quit {
         while let Ok(msg) = msg_rx.try_recv() {
             app.handle_msg(msg);
@@ -281,15 +297,22 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App, msg_rx: &R
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [top, body, bottom] =
-        Layout::vertical([Constraint::Length(header::ROWS), Constraint::Min(0), Constraint::Length(FOOTER_ROWS)]).areas(f.area());
+    let [top, body, bottom] = Layout::vertical([
+        Constraint::Length(header::ROWS),
+        Constraint::Min(0),
+        Constraint::Length(FOOTER_ROWS),
+    ])
+    .areas(f.area());
     if app.body != body {
         app.body = body;
         app.clamp();
     }
     f.render_widget(Paragraph::new(header::lines(app, top.width as usize)), top);
     f.render_widget(Paragraph::new(body_lines(app, body.width as usize)), body);
-    f.render_widget(Paragraph::new(footer_line(app, bottom.width as usize)), bottom);
+    f.render_widget(
+        Paragraph::new(footer_line(app, bottom.width as usize)),
+        bottom,
+    );
 }
 
 pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
@@ -302,12 +325,20 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
         match &app.status {
             Status::NoRepo(cwd) => {
                 lines.push(Line::from(Span::styled("No GitHub remote in", dim)));
-                lines.extend(wrap(cwd, w).into_iter().map(|c| Line::from(Span::styled(c, dim))));
+                lines.extend(
+                    wrap(cwd, w)
+                        .into_iter()
+                        .map(|c| Line::from(Span::styled(c, dim))),
+                );
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("Watching for one…", dim)));
             }
             Status::Error(e) => {
-                lines.extend(wrap(e, w).into_iter().map(|c| Line::from(Span::styled(c, Style::default().fg(Color::Red)))));
+                lines.extend(
+                    wrap(e, w)
+                        .into_iter()
+                        .map(|c| Line::from(Span::styled(c, Style::default().fg(Color::Red)))),
+                );
             }
             _ => lines.push(Line::from(Span::styled("fetching GitHub…", dim))),
         }
@@ -331,7 +362,11 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
 
 fn footer_line(app: &App, w: usize) -> Line<'static> {
     let n = app.nodes.len();
-    let pos = if n > 0 { format!("{}/{n}", app.cursor + 1) } else { String::new() };
+    let pos = if n > 0 {
+        format!("{}/{n}", app.cursor + 1)
+    } else {
+        String::new()
+    };
     let mut spans = vec![" q".bold(), " quit".dim(), " ?".bold(), " help".dim()];
     let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     spans.push(Span::raw(" ".repeat(w.saturating_sub(left_w + pos.len()))));
@@ -350,20 +385,64 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         let issue = |n: u64, ms: Option<u64>| Issue {
-            number: n, title: format!("Issue {n}"), state: "open".into(), state_reason: None,
-            milestone: ms.map(|m| MilestoneRef { number: m }), labels: vec![], assignees: vec![], updated_at: String::new(),
-            closed_at: None, html_url: format!("https://x/{n}"), pull_request: None,
+            number: n,
+            title: format!("Issue {n}"),
+            state: "open".into(),
+            state_reason: None,
+            milestone: ms.map(|m| MilestoneRef { number: m }),
+            labels: vec![],
+            assignees: vec![],
+            updated_at: String::new(),
+            closed_at: None,
+            html_url: format!("https://x/{n}"),
+            pull_request: None,
         };
         Snapshot {
-            repo: RepoRef { owner: "o".into(), name: "r".into(), branch: Some("main".into()), root: "/x".into() },
+            repo: RepoRef {
+                owner: "o".into(),
+                name: "r".into(),
+                branch: Some("main".into()),
+                root: "/x".into(),
+            },
             milestones: vec![Milestone {
-                number: 1, title: "Status pane core".into(), state: "open".into(), open_issues: 5, closed_issues: 1,
-                due_on: None, html_url: "https://m/1".into(), updated_at: String::new(),
+                number: 1,
+                title: "Status pane core".into(),
+                state: "open".into(),
+                open_issues: 5,
+                closed_issues: 1,
+                due_on: None,
+                html_url: "https://m/1".into(),
+                updated_at: String::new(),
             }],
-            issues: (2..=7).map(|n| issue(n, Some(1))).chain([issue(8, None)]).collect(),
-            prs: vec![PullRequest { number: 11, title: "Scaffold the plugin".into(), state: "open".into(), draft: true,
-                merged_at: None, closed_at: None, head: GitRef { name: "b".into(), sha: String::new(), repo: None }, base: GitRef { name: "main".into(), sha: String::new(), repo: None },
-                user: None, updated_at: String::new(), html_url: "https://p/11".into(), body: None, extra: Default::default() }],
+            issues: (2..=7)
+                .map(|n| issue(n, Some(1)))
+                .chain([issue(8, None)])
+                .collect(),
+            prs: vec![PullRequest {
+                number: 11,
+                title: "Scaffold the plugin".into(),
+                state: "open".into(),
+                draft: true,
+                merged_at: None,
+                closed_at: None,
+                head: GitRef {
+                    name: "b".into(),
+                    sha: String::new(),
+                    repo: None,
+                },
+                base: GitRef {
+                    name: "main".into(),
+                    sha: String::new(),
+                    repo: None,
+                },
+                user: None,
+                updated_at: String::new(),
+                html_url: "https://p/11".into(),
+                body: None,
+                extra: Default::default(),
+            }],
+            runs: vec![],
+            checks: Default::default(),
             fetched_at: SystemTime::now(),
             rate_remaining: Some(4999),
             authenticated: true,
@@ -378,15 +457,33 @@ mod tests {
     }
 
     fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent { code, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE })
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
     }
 
     fn click(row: u16) -> Event {
-        Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 3, row, modifiers: KeyModifiers::NONE })
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     fn texts(lines: &[Line<'static>]) -> Vec<String> {
-        lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect()
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     #[test]
@@ -398,14 +495,14 @@ mod tests {
         assert!(text[0].starts_with("▾ NOW"));
         assert!(text[2].starts_with("▾ MILESTONES"));
         assert!(text[3].contains("Status pane") && text[3].ends_with("1/6"));
-        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/14"));
+        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/16"));
     }
 
     #[test]
     fn cursor_moves_scrolls_and_wraps_sections() {
         let mut app = app();
         let n = app.nodes.len();
-        assert_eq!(n, 14);
+        assert_eq!(n, 16);
         for _ in 0..8 {
             app.handle_event(key(KeyCode::Char('j')));
         }
@@ -416,13 +513,22 @@ mod tests {
         app.handle_event(key(KeyCode::Char('g')));
         assert_eq!(app.cursor, 0);
         app.handle_event(key(KeyCode::Tab));
-        assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::Milestones)));
+        assert!(matches!(
+            app.current().unwrap().id,
+            NodeId::Section(Section::Milestones)
+        ));
         app.handle_event(key(KeyCode::BackTab));
-        assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::Now)));
+        assert!(matches!(
+            app.current().unwrap().id,
+            NodeId::Section(Section::Now)
+        ));
         app.handle_event(key(KeyCode::BackTab));
-        assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::PullRequests)), "wraps around");
+        assert!(
+            matches!(app.current().unwrap().id, NodeId::Section(Section::Actions)),
+            "wraps around"
+        );
         app.handle_event(key(KeyCode::PageUp));
-        assert_eq!(app.cursor, 6);
+        assert_eq!(app.cursor, 8);
     }
 
     #[test]
@@ -433,18 +539,33 @@ mod tests {
         }
         assert_eq!(app.current_url(), Some("https://m/1"));
         app.handle_event(key(KeyCode::Enter));
-        assert_eq!(app.nodes.len(), 8);
+        assert_eq!(app.nodes.len(), 10);
         assert!(!app.nodes.iter().any(|n| matches!(n.id, NodeId::Issue(2))));
         app.handle_event(key(KeyCode::Left));
-        assert_eq!(app.nodes.len(), 8, "left on a collapsed node stays collapsed");
+        assert_eq!(
+            app.nodes.len(),
+            10,
+            "left on a collapsed node stays collapsed"
+        );
         app.handle_event(key(KeyCode::Right));
-        assert_eq!(app.nodes.len(), 14, "right expands");
+        assert_eq!(app.nodes.len(), 16, "right expands");
         app.handle_event(key(KeyCode::Char('G')));
+        assert_eq!(
+            app.current_url(),
+            None,
+            "the no-runs placeholder has no link"
+        );
+        app.handle_event(key(KeyCode::Char('k')));
+        app.handle_event(key(KeyCode::Char('k')));
         assert_eq!(app.current_url(), Some("https://p/11"));
         app.handle_event(key(KeyCode::Char('?')));
         assert!(app.show_help);
         let help = texts(&body_lines(&app, 26));
-        assert!(help.iter().all(|t| t.chars().count() <= 26 && !t.contains('…')), "{help:?}");
+        assert!(
+            help.iter()
+                .all(|t| t.chars().count() <= 26 && !t.contains('…')),
+            "{help:?}"
+        );
         app.handle_event(key(KeyCode::Char('x')));
         assert!(!app.show_help);
     }
@@ -455,7 +576,11 @@ mod tests {
         app.handle_event(click(5)); // body starts at y=2 → row index 3 (milestone)
         assert_eq!(app.cursor, 3);
         app.handle_event(click(5));
-        assert_eq!(app.nodes.len(), 8, "second click on the selected milestone collapses it");
+        assert_eq!(
+            app.nodes.len(),
+            10,
+            "second click on the selected milestone collapses it"
+        );
         app.handle_event(click(40));
         assert_eq!(app.cursor, 3, "clicks outside the body are ignored");
     }
@@ -489,21 +614,38 @@ mod tests {
         let mut app = app();
         let mut other = snapshot().repo;
         other.name = "elsewhere".into();
-        app.handle_msg(Msg::Error { repo: other, message: "404".into() });
+        app.handle_msg(Msg::Error {
+            repo: other,
+            message: "404".into(),
+        });
         assert!(app.snapshot.is_none());
         assert!(app.nodes.is_empty());
         app.handle_msg(Msg::Snapshot(Box::new(snapshot())));
-        app.handle_msg(Msg::Error { repo: snapshot().repo, message: "flaky".into() });
-        assert!(app.snapshot.is_some(), "same-repo errors keep the last snapshot");
+        app.handle_msg(Msg::Error {
+            repo: snapshot().repo,
+            message: "flaky".into(),
+        });
+        assert!(
+            app.snapshot.is_some(),
+            "same-repo errors keep the last snapshot"
+        );
     }
 
     #[test]
     fn agents_update_rebuilds_now_section() {
         let mut app = app();
         assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)));
-        app.handle_msg(Msg::Agents(vec![AgentInfo { pane_id: "w7:p1".into(), agent: "claude".into(), status: "working".into(), title: None }]));
+        app.handle_msg(Msg::Agents(vec![AgentInfo {
+            pane_id: "w7:p1".into(),
+            agent: "claude".into(),
+            status: "working".into(),
+            title: None,
+        }]));
         assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Agent(_))));
-        assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)), "no branch work: still nothing in progress");
+        assert!(
+            app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)),
+            "no branch work: still nothing in progress"
+        );
         let text = texts(&body_lines(&app, 26));
         assert!(text[0].ends_with("1 busy"), "{:?}", text[0]);
     }

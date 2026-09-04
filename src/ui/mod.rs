@@ -9,7 +9,12 @@ use ratatui::text::{Line, Span};
 use std::time::SystemTime;
 
 /// A row with `left` spans (occupying `left_width` columns) and a dim, right-aligned count.
-pub fn right_count(mut left: Vec<Span<'static>>, left_width: usize, count: String, w: usize) -> Line<'static> {
+pub fn right_count(
+    mut left: Vec<Span<'static>>,
+    left_width: usize,
+    count: String,
+    w: usize,
+) -> Line<'static> {
     let pad = w.saturating_sub(left_width + count.chars().count());
     left.push(Span::raw(" ".repeat(pad.max(1))));
     left.push(Span::styled(count, Style::default().fg(Color::DarkGray)));
@@ -17,11 +22,28 @@ pub fn right_count(mut left: Vec<Span<'static>>, left_width: usize, count: Strin
 }
 
 pub fn age_string(t: SystemTime) -> String {
-    let secs = SystemTime::now().duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+    fmt_duration(
+        SystemTime::now()
+            .duration_since(t)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
+/// Compact duration: `45s`, `3m`, `1h20m`, `2d`.
+pub fn fmt_duration(secs: u64) -> String {
     match secs {
         0..=59 => format!("{secs}s"),
         60..=3599 => format!("{}m", secs / 60),
-        _ => format!("{}h", secs / 3600),
+        3600..=86_399 => {
+            let m = (secs % 3600) / 60;
+            if m == 0 {
+                format!("{}h", secs / 3600)
+            } else {
+                format!("{}h{m}m", secs / 3600)
+            }
+        }
+        _ => format!("{}d", secs / 86_400),
     }
 }
 
@@ -91,6 +113,15 @@ mod tests {
         assert_eq!(truncate("x", 0), "");
         assert_eq!(fit("ab", 4), "ab  ");
         assert_eq!(fit("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(fmt_duration(5), "5s");
+        assert_eq!(fmt_duration(125), "2m");
+        assert_eq!(fmt_duration(3600), "1h");
+        assert_eq!(fmt_duration(4800), "1h20m");
+        assert_eq!(fmt_duration(200_000), "2d");
     }
 
     #[test]

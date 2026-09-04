@@ -189,8 +189,15 @@ pub fn action_context() -> ActionContext {
 }
 
 fn is_status_process(argv0: Option<&str>, argv: &[String]) -> bool {
-    let base = |s: &str| Path::new(s).file_name().and_then(|f| f.to_str()).map(str::to_string);
-    let first = argv0.and_then(base).or_else(|| argv.first().and_then(|a| base(a)));
+    let base = |s: &str| {
+        Path::new(s)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(str::to_string)
+    };
+    let first = argv0
+        .and_then(base)
+        .or_else(|| argv.first().and_then(|a| base(a)));
     // `dock` invocations are actions, never a status pane.
     first.as_deref() == Some(BIN_NAME) && argv.get(1).map(String::as_str) != Some("dock")
 }
@@ -214,7 +221,10 @@ pub fn find_status_panes(panes: &[Pane]) -> Result<Vec<Pane>> {
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("probe thread panicked"))))
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow!("probe thread panicked")))
+            })
             .collect()
     });
     let mut found = Vec::new();
@@ -314,11 +324,30 @@ mod tests {
     use crate::herdr::{parse_layout, LayoutPane, Rect};
 
     fn pane(id: &str, x: u32, y: u32, w: u32, h: u32, focused: bool) -> LayoutPane {
-        LayoutPane { pane_id: id.into(), focused, rect: Rect { x, y, width: w, height: h } }
+        LayoutPane {
+            pane_id: id.into(),
+            focused,
+            rect: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+        }
     }
 
     fn layout(panes: Vec<LayoutPane>) -> Layout {
-        Layout { area: Rect { x: 26, y: 1, width: 215, height: 93 }, panes, splits: vec![], zoomed: false }
+        Layout {
+            area: Rect {
+                x: 26,
+                y: 1,
+                width: 215,
+                height: 93,
+            },
+            panes,
+            splits: vec![],
+            zoomed: false,
+        }
     }
 
     /// A real `herdr pane layout --pane w7:p1` envelope (herdr 0.8.0): 215 columns split 0.8.
@@ -366,7 +395,10 @@ mod tests {
         let single = layout(vec![pane("w1:p1", 26, 1, 215, 93, true)]);
         assert_eq!(open_target(&single).unwrap(), "w1:p1");
         // Ties on height go to the focused pane.
-        let tie = layout(vec![pane("w1:p1", 26, 1, 100, 93, false), pane("w1:p2", 126, 1, 115, 93, true)]);
+        let tie = layout(vec![
+            pane("w1:p1", 26, 1, 100, 93, false),
+            pane("w1:p2", 126, 1, 115, 93, true),
+        ]);
         assert_eq!(open_target(&tie).unwrap(), "w1:p2");
     }
 
@@ -388,9 +420,15 @@ mod tests {
     #[test]
     fn status_process_detection() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(is_status_process(Some("herdr-github-status"), &argv(&["/x/bin/herdr-github-status"])));
+        assert!(is_status_process(
+            Some("herdr-github-status"),
+            &argv(&["/x/bin/herdr-github-status"])
+        ));
         assert!(is_status_process(None, &argv(&["/x/herdr-github-status"])));
-        assert!(!is_status_process(Some("herdr-github-status"), &argv(&["herdr-github-status", "dock", "toggle"])));
+        assert!(!is_status_process(
+            Some("herdr-github-status"),
+            &argv(&["herdr-github-status", "dock", "toggle"])
+        ));
         assert!(!is_status_process(Some("zsh"), &argv(&["-zsh"])));
         assert!(!is_status_process(None, &[]));
     }
