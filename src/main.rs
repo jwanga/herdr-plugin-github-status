@@ -8,7 +8,12 @@
 
 mod app;
 mod dock;
+mod github;
 mod herdr;
+mod model;
+mod poll;
+mod repo;
+mod util;
 
 use std::process::ExitCode;
 

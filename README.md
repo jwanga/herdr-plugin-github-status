@@ -9,7 +9,7 @@ A [herdr](https://herdr.dev) plugin that docks a real-time **status** pane on th
   - [Configuration](#configuration)
 
 ## Installation
-Requires herdr ≥ 0.8.0 and an authenticated GitHub CLI (`gh auth login`), or a `GH_TOKEN` / `GITHUB_TOKEN` environment variable.
+Requires herdr ≥ 0.8.0 and `git`. Recommended: an authenticated GitHub CLI (`gh auth login`) or a `GH_TOKEN` / `GITHUB_TOKEN` environment variable, needed for private repositories and the higher rate limit.
 
 From GitHub (builds from source with `cargo` on install; prebuilt binaries arrive with the publishing milestone):
 
@@ -39,12 +39,15 @@ type = "plugin_action"
 command = "jwanga.github-status.toggle"
 ```
 
+The pane follows the working directory of the workspace's focused pane (so pointing an agent at another checkout switches the status view), resolves the GitHub repository from the `origin` remote (or any other github.com remote), and refreshes every 10 seconds. It authenticates with `GH_TOKEN` / `GITHUB_TOKEN` or `gh auth token`; without a token it still reads public repositories and shows a `no-token` marker.
+
 The pane docks on the right of the current tab at the same width as herdr's left sidebar (read live from herdr's `session.json`, default 26 columns). `toggle` closes an open status pane in the tab; `open` focuses an existing one; `close` closes every status pane in the workspace. Note that `herdr plugin action invoke` targets the *focused* workspace, wherever you run it.
 
 ### Keys
 | Key | Action |
 | --- | --- |
 | `q` / `Ctrl+Q` / `Ctrl+C` | Close the pane |
+| `r` | Refresh now |
 
 More keys land with each feature; press `?` inside the pane for the live list.
 

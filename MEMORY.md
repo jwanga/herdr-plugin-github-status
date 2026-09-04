@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #2 Detect the workspace repository and fetch milestones, issues, and PRs (next)
-- **Current Branch**: main
+- **Current Issue**: #2 Detect the workspace repository and fetch milestones, issues, and PRs (implemented, merging)
+- **Current Branch**: issue-2-repo-github-fetch
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -22,6 +22,9 @@
 - [2026-09-04 01:45] @jwanga: Issue #1 done — PR #11 merged (PR #10 was auto-closed by the history rewrite). Verification review found one low-impact finding (final width check vs clamped target), fixed before merge. Note: `gh pr review --approve` is blocked by the local permission classifier and GitHub rejects self-approval anyway; merged with `gh pr merge` directly. Old pre-rewrite commit SHAs remain fetchable on GitHub until its GC runs; a support request or repo re-creation would purge them.
 
 - [2026-09-04 01:50] @jwanga: Refreshed architecture diagram (trigger: issue-close #1, diagram type: flowchart; mermaid CLI check skipped — avoids a puppeteer download)
+- [2026-09-04 02:10] @jwanga: Issue #2 gate — accepted defaults: follow the focused pane's live `foreground_cwd`; unauthenticated public fallback with a `no-token` marker; fetch bounds all milestones / 300 issues / 50 PRs.
+- [2026-09-04 02:25] @jwanga: Issue #2 implemented on `issue-2-repo-github-fetch`: `repo.rs` (remote parsing, origin-first), `github.rs` (ureq client, token discovery, Link pagination, status handling incl. 304), `model.rs`, `poll.rs` (background thread, 10 s interval, `r` refresh, cwd following via `pane list`), flat sections in `app.rs`. 13 tests. Verified live: pane shows repo/branch/age, 2 milestones with progress, 8 open issues, PR count at 26 columns; non-git directory shows the no-repo message.
+- [2026-09-04 02:45] @jwanga: PR #12 reviewed by 3 agents (0 Critical, 14 Important) — all auto-fixed (rule #15): header reserves the `no-token`/`!` suffix before truncating the branch; poll loop ticks every 2 s for cwd changes and fetches on repo change / 10 s / `r` with the refresh queue drained; 403/429 backoff via `Retry-After` or `X-RateLimit-Reset` (`RateLimited` error); one-hop redirect follow for renamed repos; `Msg::Error` carries the repo and clears a stale snapshot from another repo; shared `util::stdout`, `Pane::live_cwd`, `right_count`/`item_row` helpers; README auth wording. 16 tests.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
