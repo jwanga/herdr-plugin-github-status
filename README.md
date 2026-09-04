@@ -39,10 +39,14 @@ type = "plugin_action"
 command = "jwanga.github-status.toggle"
 ```
 
-The pane docks on the right at the same width as herdr's left sidebar and follows the workspace's repository.
+The pane docks on the right of the current tab at the same width as herdr's left sidebar (read live from herdr's `session.json`, default 26 columns). `toggle` closes an open status pane in the tab; `open` focuses an existing one; `close` closes every status pane in the workspace. Note that `herdr plugin action invoke` targets the *focused* workspace, wherever you run it.
 
 ### Keys
-Documented as features land; press `?` inside the pane for the live list.
+| Key | Action |
+| --- | --- |
+| `q` / `Ctrl+C` | Close the pane |
+
+More keys land with each feature; press `?` inside the pane for the live list.
 
 ### Configuration
 Documented as features land. Config lives in the directory printed by `herdr plugin config-dir jwanga.github-status`.
