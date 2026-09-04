@@ -21,6 +21,8 @@
 
 - [2026-09-04 01:45] @jwanga: Issue #1 done — PR #11 merged (PR #10 was auto-closed by the history rewrite). Verification review found one low-impact finding (final width check vs clamped target), fixed before merge. Note: `gh pr review --approve` is blocked by the local permission classifier and GitHub rejects self-approval anyway; merged with `gh pr merge` directly. Old pre-rewrite commit SHAs remain fetchable on GitHub until its GC runs; a support request or repo re-creation would purge them.
 
+- [2026-09-04 01:50] @jwanga: Refreshed architecture diagram (trigger: issue-close #1, diagram type: flowchart; mermaid CLI check skipped — avoids a puppeteer download)
+
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
 - [2026-09-04 00:25] @jwanga: Implementation language = Rust + ratatui + crossterm + ureq. Rationale: matches herdr itself and the leading sidebar plugins (reviewr, herdr-sidebar, ghzinga); single static binary; prebuilt-release install path is the ecosystem convention. Alternatives considered: (a) minimal bash + `gh` + `watch` script — cannot do interactive tree/mouse or ETag polling well; (b) Node/ink — needs a Node runtime at install and is not the ecosystem norm; (c) Go/bubbletea (herdr-plus style) — viable, but Rust keeps parity with herdr's own tooling and the reviewer/sidebar precedents.
