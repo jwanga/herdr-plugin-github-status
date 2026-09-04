@@ -1,0 +1,24 @@
+[package]
+name = "herdr-github-status"
+version = "0.1.0"
+edition = "2021"
+description = "herdr plugin pane showing a real-time GitHub project status (milestones, issues, PRs, Actions)"
+license = "MIT"
+repository = "https://github.com/jwanga/herdr-plugin-github-status"
+
+[[bin]]
+name = "herdr-github-status"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
