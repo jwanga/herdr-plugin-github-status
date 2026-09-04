@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #5 GitHub Actions: workflow runs and check runs (next)
-- **Current Branch**: main
+- **Current Issue**: #5 GitHub Actions: workflow runs and check runs (implemented, merging)
+- **Current Branch**: issue-5-actions-runs
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -37,6 +37,8 @@
 - [2026-09-04 05:30] @jwanga: PR #14 reviewed by 3 agents (0 Critical, 14 Important) — all auto-fixed (rule #15): NOW idle logic unified (`idle` = no active issue and no current-branch PR; count shows busy agents); `closing_refs` no longer treats `other/repo#7` as local; `current_pr` requires the head repo to be ours (fork-safe); checks glyph uses the rollup `state` as tie-breaker; REST reviews fallback for the current branch's PR when GraphQL is unavailable (one request, so the 60/h unauthenticated budget survives); `PrExtra::from_graphql` + `Checks::from_rollup` moved to model.rs; `mergeable` dropped; `issue_from_branch` rewritten; shared `is_recent`; agent listing keeps the previous list on transient errors; tests for main + idle agent and out-of-view active issue. 30 tests.
 - [2026-09-04 05:45] @jwanga: Issue #4 done — PR #14 merged; milestone 1 at 4/6.
 - [2026-09-04 05:45] @jwanga: Refreshed architecture diagram (trigger: issue-close #4, diagram type: flowchart)
+- [2026-09-04 06:00] @jwanga: Issue #5 gate — accepted defaults: check runs for ≤5 open PR heads when authenticated (current-branch PR only without a token); 5 s polling while any run is queued/in progress; one row per run (icon, workflow, elapsed/duration; branch at ≥36 cols).
+- [2026-09-04 06:40] @jwanga: Issue #5 implemented on `issue-5-actions-runs`: `WorkflowRun`/`CheckRun` models, `Checks::from_check_runs`, `/actions/runs` + `/commits/{sha}/check-runs` fetches, `poll::interval_for` (5 s while active), ACTIONS section + active runs in NOW + check runs under expanded PRs, `run_icon`, `fmt_duration`. Added `.github/workflows/ci.yml` (fmt, clippy -D warnings, test) so the live run transition can be observed; issue #9 extends it with releases. 35 tests.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

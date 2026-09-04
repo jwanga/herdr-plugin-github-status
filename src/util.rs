@@ -45,14 +45,22 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T')?;
     let mut d = date.split('-');
-    let (y, m, day): (i64, u32, u32) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let (y, m, day): (i64, u32, u32) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
     let (time, offset) = match rest.find(['Z', '+', '-']) {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "Z"),
     };
     let time = time.split('.').next()?;
     let mut t = time.split(':');
-    let (hh, mm, ss): (u64, u64, u64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next().unwrap_or("0").parse().ok()?);
+    let (hh, mm, ss): (u64, u64, u64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next().unwrap_or("0").parse().ok()?,
+    );
     let offset_secs: i64 = if offset == "Z" || offset.is_empty() {
         0
     } else {
@@ -86,8 +94,14 @@ mod tests {
     fn parses_github_timestamps() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-09-04T07:45:32Z"), Some(1_788_507_932));
-        assert_eq!(parse_rfc3339("2026-09-04T07:45:32.123Z"), Some(1_788_507_932));
-        assert_eq!(parse_rfc3339("2026-09-04T09:45:32+02:00"), Some(1_788_507_932));
+        assert_eq!(
+            parse_rfc3339("2026-09-04T07:45:32.123Z"),
+            Some(1_788_507_932)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-09-04T09:45:32+02:00"),
+            Some(1_788_507_932)
+        );
         assert_eq!(parse_rfc3339("garbage"), None);
     }
 }

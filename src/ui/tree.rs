@@ -1,8 +1,8 @@
 //! The section tree: sections → groups → milestones → issues, flattened into nodes
 //! according to which nodes are expanded, and rendered per node at a given width.
 
-use crate::model::{AgentInfo, Issue, Milestone, PullRequest, Snapshot};
-use crate::ui::{fit, right_count, truncate};
+use crate::model::{AgentInfo, CheckRun, Issue, Milestone, PullRequest, Snapshot, WorkflowRun};
+use crate::ui::{fit, fmt_duration, right_count, truncate};
 use crate::util::parse_rfc3339;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,6 +18,7 @@ pub enum Section {
     Milestones,
     Issues,
     PullRequests,
+    Actions,
 }
 
 impl Section {
@@ -27,6 +28,7 @@ impl Section {
             Section::Milestones => "MILESTONES",
             Section::Issues => "ISSUES",
             Section::PullRequests => "PULL REQUESTS",
+            Section::Actions => "ACTIONS",
         }
     }
 }
@@ -44,19 +46,39 @@ pub enum NodeId {
     PrDetail(u64, usize),
     NowIssue(u64),
     NowPr(u64),
+    NowRun(u64),
     Agent(String),
     Idle,
+    NoRuns,
+    Run(u64),
+    /// A check run under a PR: (pr number, check id).
+    PrCheck(u64, u64),
 }
 
 #[derive(Debug, Clone)]
 pub enum NodeKind {
-    Section { section: Section, count: String },
-    Group { label: &'static str, count: usize },
+    Section {
+        section: Section,
+        count: String,
+    },
+    Group {
+        label: &'static str,
+        count: usize,
+    },
     Milestone(Milestone),
     /// `active` marks the issue being worked on (branch or open PR).
-    Issue { issue: Issue, active: bool },
+    Issue {
+        issue: Issue,
+        active: bool,
+    },
     Pr(PullRequest),
     Agent(AgentInfo),
+    /// A workflow run with its elapsed seconds (computed at flatten time).
+    Run {
+        run: WorkflowRun,
+        elapsed: Option<u64>,
+    },
+    Check(CheckRun),
     /// A dim informational line.
     Info(String),
 }
@@ -99,18 +121,24 @@ impl TreeState {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Whether an RFC 3339 timestamp is within the recently-closed window of `now`.
 fn is_recent(ts: Option<&str>, now: u64) -> bool {
-    ts.and_then(parse_rfc3339).is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
+    ts.and_then(parse_rfc3339)
+        .is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
 }
 
 /// Issue number from a branch named `issue-<n>-…` (the engineering-plugin convention).
 pub fn issue_from_branch(branch: &str) -> Option<u64> {
     let rest = branch.strip_prefix("issue-")?;
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     let (digits, tail) = rest.split_at(end);
     let bounded = tail.is_empty() || tail.starts_with(['-', '/']);
     if bounded {
@@ -124,7 +152,8 @@ pub fn issue_from_branch(branch: &str) -> Option<u64> {
 /// branch's open PR closes.
 pub fn active_issue(s: &Snapshot) -> Option<u64> {
     let branch = s.repo.branch.as_deref()?;
-    issue_from_branch(branch).or_else(|| current_pr(s).and_then(|p| p.extra.closes.first().copied()))
+    issue_from_branch(branch)
+        .or_else(|| current_pr(s).and_then(|p| p.extra.closes.first().copied()))
 }
 
 /// The open PR whose head is the current branch *in this repository* (a fork's branch of
@@ -133,12 +162,29 @@ pub fn current_pr(s: &Snapshot) -> Option<&PullRequest> {
     let branch = s.repo.branch.as_deref()?;
     let full = s.repo.full_name();
     s.prs.iter().find(|p| {
-        p.is_open() && p.head.name == branch && p.head.repo.as_ref().is_some_and(|r| r.full_name.eq_ignore_ascii_case(&full))
+        p.is_open()
+            && p.head.name == branch
+            && p.head
+                .repo
+                .as_ref()
+                .is_some_and(|r| r.full_name.eq_ignore_ascii_case(&full))
     })
 }
 
+/// Seconds a run has been going (or took): from `run_started_at` to `updated_at` when
+/// completed, to `now` otherwise.
+pub fn run_elapsed(r: &WorkflowRun, now: u64) -> Option<u64> {
+    let start = parse_rfc3339(r.run_started_at.as_deref()?)?;
+    let end = if r.is_active() {
+        now
+    } else {
+        parse_rfc3339(&r.updated_at)?
+    };
+    Some(end.saturating_sub(start))
+}
+
 /// Flatten the snapshot into visible nodes for `state`; `now` (Unix seconds) bounds the
-/// recently-closed groups; `agents` are this workspace's herdr agents.
+/// recently-closed groups and run durations; `agents` are this workspace's herdr agents.
 pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) -> Vec<Node> {
     let mut out = Vec::new();
     let repo_url = format!("https://github.com/{}/{}", s.repo.owner, s.repo.name);
@@ -147,23 +193,83 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     // ---- Now: the active issue, the current branch's PR, and the workspace's agents.
     let now_issue = active.and_then(|n| s.issues.iter().find(|i| i.number == n));
     let now_pr = current_pr(s);
-    let busy = agents.iter().filter(|a| a.status == "working" || a.status == "blocked").count();
-    let idle = active.is_none() && now_pr.is_none();
-    let count = if busy > 0 { format!("{busy} busy") } else { "idle".to_string() };
-    if section(&mut out, state, Section::Now, count, format!("{repo_url}/pulls")) {
+    let active_runs: Vec<&WorkflowRun> = s.runs.iter().filter(|r| r.is_active()).collect();
+    let busy = agents
+        .iter()
+        .filter(|a| a.status == "working" || a.status == "blocked")
+        .count()
+        + active_runs.len();
+    let idle = active.is_none() && now_pr.is_none() && active_runs.is_empty();
+    let count = if busy > 0 {
+        format!("{busy} busy")
+    } else {
+        "idle".to_string()
+    };
+    if section(
+        &mut out,
+        state,
+        Section::Now,
+        count,
+        format!("{repo_url}/pulls"),
+    ) {
         if let Some(i) = now_issue {
-            out.push(Node { id: NodeId::NowIssue(i.number), depth: 1, expandable: None, url: Some(i.html_url.clone()), kind: NodeKind::Issue { issue: i.clone(), active: true } });
+            out.push(Node {
+                id: NodeId::NowIssue(i.number),
+                depth: 1,
+                expandable: None,
+                url: Some(i.html_url.clone()),
+                kind: NodeKind::Issue {
+                    issue: i.clone(),
+                    active: true,
+                },
+            });
         } else if let Some(n) = active {
-            out.push(Node { id: NodeId::NowIssue(n), depth: 1, expandable: None, url: Some(format!("{repo_url}/issues/{n}")), kind: NodeKind::Info(format!("▶ #{n} (not in view)")) });
+            out.push(Node {
+                id: NodeId::NowIssue(n),
+                depth: 1,
+                expandable: None,
+                url: Some(format!("{repo_url}/issues/{n}")),
+                kind: NodeKind::Info(format!("▶ #{n} (not in view)")),
+            });
         }
         if let Some(p) = now_pr {
-            out.push(Node { id: NodeId::NowPr(p.number), depth: 1, expandable: None, url: Some(p.html_url.clone()), kind: NodeKind::Pr(p.clone()) });
+            out.push(Node {
+                id: NodeId::NowPr(p.number),
+                depth: 1,
+                expandable: None,
+                url: Some(p.html_url.clone()),
+                kind: NodeKind::Pr(p.clone()),
+            });
+        }
+        for r in &active_runs {
+            out.push(Node {
+                id: NodeId::NowRun(r.id),
+                depth: 1,
+                expandable: None,
+                url: Some(r.html_url.clone()),
+                kind: NodeKind::Run {
+                    run: (*r).clone(),
+                    elapsed: run_elapsed(r, now),
+                },
+            });
         }
         if idle {
-            out.push(Node { id: NodeId::Idle, depth: 1, expandable: None, url: None, kind: NodeKind::Info("nothing in progress".into()) });
+            out.push(Node {
+                id: NodeId::Idle,
+                depth: 1,
+                expandable: None,
+                url: None,
+                kind: NodeKind::Info("nothing in progress".into()),
+            });
         }
         for a in agents {
-            out.push(Node { id: NodeId::Agent(a.pane_id.clone()), depth: 1, expandable: None, url: None, kind: NodeKind::Agent(a.clone()) });
+            out.push(Node {
+                id: NodeId::Agent(a.pane_id.clone()),
+                depth: 1,
+                expandable: None,
+                url: None,
+                kind: NodeKind::Agent(a.clone()),
+            });
         }
     }
 
@@ -176,13 +282,27 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
             .then_with(|| a.due_on.cmp(&b.due_on))
             .then_with(|| a.number.cmp(&b.number))
     });
-    let (open_ms, closed_ms): (Vec<&Milestone>, Vec<&Milestone>) = milestones.iter().partition(|m| m.state == "open");
-    if section(&mut out, state, Section::Milestones, open_ms.len().to_string(), format!("{repo_url}/milestones")) {
+    let (open_ms, closed_ms): (Vec<&Milestone>, Vec<&Milestone>) =
+        milestones.iter().partition(|m| m.state == "open");
+    if section(
+        &mut out,
+        state,
+        Section::Milestones,
+        open_ms.len().to_string(),
+        format!("{repo_url}/milestones"),
+    ) {
         for m in &open_ms {
             push_milestone(&mut out, s, state, m, active);
         }
         if !closed_ms.is_empty()
-            && group(&mut out, state, NodeId::ClosedMilestones, "closed", closed_ms.len(), format!("{repo_url}/milestones?state=closed"))
+            && group(
+                &mut out,
+                state,
+                NodeId::ClosedMilestones,
+                "closed",
+                closed_ms.len(),
+                format!("{repo_url}/milestones?state=closed"),
+            )
         {
             for m in &closed_ms {
                 push_milestone(&mut out, s, state, m, active);
@@ -191,7 +311,11 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     }
 
     // ---- Issues without a milestone
-    let mut unassigned: Vec<&Issue> = s.issues.iter().filter(|i| i.milestone.is_none() && i.is_open()).collect();
+    let mut unassigned: Vec<&Issue> = s
+        .issues
+        .iter()
+        .filter(|i| i.milestone.is_none() && i.is_open())
+        .collect();
     unassigned.sort_by_key(|i| i.number);
     let mut recent: Vec<&Issue> = s
         .issues
@@ -199,7 +323,13 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
         .filter(|i| i.milestone.is_none() && !i.is_open() && is_recent(i.closed_at.as_deref(), now))
         .collect();
     recent.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
-    if section(&mut out, state, Section::Issues, format!("{} open", unassigned.len()), format!("{repo_url}/issues")) {
+    if section(
+        &mut out,
+        state,
+        Section::Issues,
+        format!("{} open", unassigned.len()),
+        format!("{repo_url}/issues"),
+    ) {
         for i in &unassigned {
             out.push(issue_node(i, 1, active));
         }
@@ -225,36 +355,112 @@ pub fn flatten(s: &Snapshot, state: &TreeState, now: u64, agents: &[AgentInfo]) 
     let mut recent_prs: Vec<&PullRequest> = s
         .prs
         .iter()
-        .filter(|p| !p.is_open() && is_recent(p.closed_at.as_deref().or(p.merged_at.as_deref()), now))
+        .filter(|p| {
+            !p.is_open() && is_recent(p.closed_at.as_deref().or(p.merged_at.as_deref()), now)
+        })
         .collect();
     recent_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    if section(&mut out, state, Section::PullRequests, format!("{} open", open_prs.len()), format!("{repo_url}/pulls")) {
+    if section(
+        &mut out,
+        state,
+        Section::PullRequests,
+        format!("{} open", open_prs.len()),
+        format!("{repo_url}/pulls"),
+    ) {
         for p in &open_prs {
             push_pr(&mut out, s, state, p, &repo_url);
         }
         if !recent_prs.is_empty()
-            && group(&mut out, state, NodeId::RecentPrs, "recently merged/closed", recent_prs.len(), format!("{repo_url}/pulls?q=is%3Apr+is%3Aclosed"))
+            && group(
+                &mut out,
+                state,
+                NodeId::RecentPrs,
+                "recently merged/closed",
+                recent_prs.len(),
+                format!("{repo_url}/pulls?q=is%3Apr+is%3Aclosed"),
+            )
         {
             for p in &recent_prs {
                 push_pr(&mut out, s, state, p, &repo_url);
             }
         }
     }
+
+    // ---- Actions: the latest workflow runs, newest first.
+    let count = if active_runs.is_empty() {
+        s.runs.len().to_string()
+    } else {
+        format!("{} active", active_runs.len())
+    };
+    if section(
+        &mut out,
+        state,
+        Section::Actions,
+        count,
+        format!("{repo_url}/actions"),
+    ) {
+        for r in &s.runs {
+            out.push(Node {
+                id: NodeId::Run(r.id),
+                depth: 1,
+                expandable: None,
+                url: Some(r.html_url.clone()),
+                kind: NodeKind::Run {
+                    run: r.clone(),
+                    elapsed: run_elapsed(r, now),
+                },
+            });
+        }
+        if s.runs.is_empty() {
+            out.push(Node {
+                id: NodeId::NoRuns,
+                depth: 1,
+                expandable: None,
+                url: None,
+                kind: NodeKind::Info("no workflow runs".into()),
+            });
+        }
+    }
     out
 }
 
 /// Push a section node; returns whether it is open.
-fn section(out: &mut Vec<Node>, state: &TreeState, section: Section, count: String, url: String) -> bool {
+fn section(
+    out: &mut Vec<Node>,
+    state: &TreeState,
+    section: Section,
+    count: String,
+    url: String,
+) -> bool {
     let id = NodeId::Section(section);
     let open = state.is_open(&id);
-    out.push(Node { id, depth: 0, expandable: Some(open), url: Some(url), kind: NodeKind::Section { section, count } });
+    out.push(Node {
+        id,
+        depth: 0,
+        expandable: Some(open),
+        url: Some(url),
+        kind: NodeKind::Section { section, count },
+    });
     open
 }
 
 /// Push a group node (depth 1); returns whether it is open.
-fn group(out: &mut Vec<Node>, state: &TreeState, id: NodeId, label: &'static str, count: usize, url: String) -> bool {
+fn group(
+    out: &mut Vec<Node>,
+    state: &TreeState,
+    id: NodeId,
+    label: &'static str,
+    count: usize,
+    url: String,
+) -> bool {
     let open = state.is_open(&id);
-    out.push(Node { id, depth: 1, expandable: Some(open), url: Some(url), kind: NodeKind::Group { label, count } });
+    out.push(Node {
+        id,
+        depth: 1,
+        expandable: Some(open),
+        url: Some(url),
+        kind: NodeKind::Group { label, count },
+    });
     open
 }
 
@@ -264,16 +470,35 @@ fn issue_node(i: &Issue, depth: usize, active: Option<u64>) -> Node {
         depth,
         expandable: None,
         url: Some(i.html_url.clone()),
-        kind: NodeKind::Issue { issue: i.clone(), active: active == Some(i.number) },
+        kind: NodeKind::Issue {
+            issue: i.clone(),
+            active: active == Some(i.number),
+        },
     }
 }
 
-fn push_milestone(out: &mut Vec<Node>, s: &Snapshot, state: &TreeState, m: &Milestone, active: Option<u64>) {
+fn push_milestone(
+    out: &mut Vec<Node>,
+    s: &Snapshot,
+    state: &TreeState,
+    m: &Milestone,
+    active: Option<u64>,
+) {
     let id = NodeId::Milestone(m.number);
     let open = state.is_open(&id);
-    out.push(Node { id, depth: 1, expandable: Some(open), url: Some(m.html_url.clone()), kind: NodeKind::Milestone(m.clone()) });
+    out.push(Node {
+        id,
+        depth: 1,
+        expandable: Some(open),
+        url: Some(m.html_url.clone()),
+        kind: NodeKind::Milestone(m.clone()),
+    });
     if open {
-        let mut issues: Vec<&Issue> = s.issues.iter().filter(|i| i.milestone.as_ref().is_some_and(|r| r.number == m.number)).collect();
+        let mut issues: Vec<&Issue> = s
+            .issues
+            .iter()
+            .filter(|i| i.milestone.as_ref().is_some_and(|r| r.number == m.number))
+            .collect();
         issues.sort_by_key(|i| (!i.is_open(), i.number));
         for i in issues {
             out.push(issue_node(i, 2, active));
@@ -285,7 +510,13 @@ fn push_milestone(out: &mut Vec<Node>, s: &Snapshot, state: &TreeState, m: &Mile
 fn push_pr(out: &mut Vec<Node>, s: &Snapshot, state: &TreeState, p: &PullRequest, repo_url: &str) {
     let id = NodeId::Pr(p.number);
     let open = state.is_open(&id);
-    out.push(Node { id, depth: 1, expandable: Some(open), url: Some(p.html_url.clone()), kind: NodeKind::Pr(p.clone()) });
+    out.push(Node {
+        id,
+        depth: 1,
+        expandable: Some(open),
+        url: Some(p.html_url.clone()),
+        kind: NodeKind::Pr(p.clone()),
+    });
     if open {
         out.push(Node {
             id: NodeId::PrDetail(p.number, 0),
@@ -295,7 +526,12 @@ fn push_pr(out: &mut Vec<Node>, s: &Snapshot, state: &TreeState, p: &PullRequest
             kind: NodeKind::Info(format!("⎇ {} → {}", p.head.name, p.base.name)),
         });
         for (k, n) in p.extra.closes.iter().enumerate() {
-            let title = s.issues.iter().find(|i| i.number == *n).map(|i| format!(" {}", i.title)).unwrap_or_default();
+            let title = s
+                .issues
+                .iter()
+                .find(|i| i.number == *n)
+                .map(|i| format!(" {}", i.title))
+                .unwrap_or_default();
             out.push(Node {
                 id: NodeId::PrDetail(p.number, k + 1),
                 depth: 2,
@@ -303,6 +539,17 @@ fn push_pr(out: &mut Vec<Node>, s: &Snapshot, state: &TreeState, p: &PullRequest
                 url: Some(format!("{repo_url}/issues/{n}")),
                 kind: NodeKind::Info(format!("closes #{n}{title}")),
             });
+        }
+        if let Some(checks) = s.checks.get(&p.head.sha) {
+            for c in checks {
+                out.push(Node {
+                    id: NodeId::PrCheck(p.number, c.id),
+                    depth: 2,
+                    expandable: None,
+                    url: c.html_url.clone(),
+                    kind: NodeKind::Check(c.clone()),
+                });
+            }
         }
     }
 }
@@ -355,6 +602,20 @@ pub fn pr_tail(p: &PullRequest) -> String {
     format!(" {review}{checks}")
 }
 
+/// Icon for a workflow run or check run from its status and conclusion.
+pub fn run_icon(status: &str, conclusion: Option<&str>) -> (&'static str, Color) {
+    match (status, conclusion.unwrap_or("")) {
+        ("queued" | "waiting" | "requested" | "pending", _) => ("◌", Color::Yellow),
+        ("in_progress", _) => ("◐", Color::Cyan),
+        ("completed", "success") => ("✓", Color::Green),
+        ("completed", "failure" | "timed_out" | "startup_failure") => ("✗", Color::Red),
+        ("completed", "action_required") => ("!", Color::Red),
+        ("completed", "cancelled") => ("⊘", Color::DarkGray),
+        ("completed", "skipped" | "neutral" | "stale") => ("→", Color::DarkGray),
+        _ => ("?", Color::DarkGray),
+    }
+}
+
 fn agent_icon(status: &str) -> (&'static str, Color) {
     match status {
         "working" => ("◐", Color::Cyan),
@@ -367,12 +628,26 @@ fn agent_icon(status: &str) -> (&'static str, Color) {
 
 /// Two-character initials for an assignee login.
 fn initials(login: &str) -> String {
-    login.chars().filter(|c| c.is_alphanumeric()).take(2).collect::<String>().to_uppercase()
+    login
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// `<indent><icon> #n <title…><suffix>` sized to exactly `w` columns.
 #[allow(clippy::too_many_arguments)]
-fn item_line(depth: usize, icon: &str, color: Color, number: u64, title: &str, title_style: Style, suffix: String, w: usize) -> Line<'static> {
+fn item_line(
+    depth: usize,
+    icon: &str,
+    color: Color,
+    number: u64,
+    title: &str,
+    title_style: Style,
+    suffix: String,
+    w: usize,
+) -> Line<'static> {
     let num = format!("#{number}");
     let pre = " ".repeat(depth);
     let title_w = w.saturating_sub(pre.len() + 2 + num.len() + 1 + suffix.chars().count());
@@ -393,30 +668,67 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
         NodeKind::Section { section, count } => {
             let head = format!("{}{}", prefix(0, open), section.title());
             let width = head.chars().count();
-            right_count(vec![Span::styled(head, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))], width, count.clone(), w)
+            right_count(
+                vec![Span::styled(
+                    head,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )],
+                width,
+                count.clone(),
+                w,
+            )
         }
         NodeKind::Group { label, count } => {
             let count = count.to_string();
             let pre = prefix(node.depth, open);
-            let head = format!("{pre}{}", truncate(label, w.saturating_sub(pre.chars().count() + count.len() + 1)));
+            let head = format!(
+                "{pre}{}",
+                truncate(
+                    label,
+                    w.saturating_sub(pre.chars().count() + count.len() + 1)
+                )
+            );
             let width = head.chars().count();
-            right_count(vec![Span::styled(head, Style::default().fg(Color::DarkGray))], width, count, w)
+            right_count(
+                vec![Span::styled(head, Style::default().fg(Color::DarkGray))],
+                width,
+                count,
+                w,
+            )
         }
         NodeKind::Milestone(m) => {
             let count = format!("{}/{}", m.closed_issues, m.total());
             let bar = if w >= 32 {
                 let cells = 6usize;
-                let filled = if m.total() == 0 { 0 } else { (m.closed_issues as usize * cells) / m.total() as usize };
+                let filled = if m.total() == 0 {
+                    0
+                } else {
+                    (m.closed_issues as usize * cells) / m.total() as usize
+                };
                 format!(" {}{}", "▓".repeat(filled), "░".repeat(cells - filled))
             } else {
                 String::new()
             };
             let tail = format!("{count}{bar}");
             let pre = prefix(node.depth, open);
-            let title = truncate(&m.title, w.saturating_sub(pre.chars().count() + tail.chars().count() + 1));
+            let title = truncate(
+                &m.title,
+                w.saturating_sub(pre.chars().count() + tail.chars().count() + 1),
+            );
             let width = pre.chars().count() + title.chars().count();
-            let style = if m.state == "open" { Style::default().add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
-            right_count(vec![Span::raw(pre), Span::styled(title, style)], width, tail, w)
+            let style = if m.state == "open" {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            right_count(
+                vec![Span::raw(pre), Span::styled(title, style)],
+                width,
+                tail,
+                w,
+            )
         }
         NodeKind::Issue { issue: i, active } => {
             let (icon, color) = issue_icon(i, *active);
@@ -435,8 +747,21 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
         }
         NodeKind::Pr(p) => {
             let (icon, color) = pr_icon(p);
-            let style = if p.is_open() { Style::default() } else { Style::default().fg(Color::DarkGray) };
-            item_line(node.depth, icon, color, p.number, &p.title, style, pr_tail(p), w)
+            let style = if p.is_open() {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            item_line(
+                node.depth,
+                icon,
+                color,
+                p.number,
+                &p.title,
+                style,
+                pr_tail(p),
+                w,
+            )
         }
         NodeKind::Agent(a) => {
             let (icon, color) = agent_icon(&a.status);
@@ -452,9 +777,54 @@ pub fn render(node: &Node, w: usize) -> Line<'static> {
                 Span::styled(status, Style::default().fg(color)),
             ])
         }
+        NodeKind::Run { run: r, elapsed } => {
+            let (icon, color) = run_icon(&r.status, r.conclusion.as_deref());
+            let elapsed = elapsed.map(fmt_duration).unwrap_or_default();
+            let pre = " ".repeat(node.depth);
+            let branch = match r.head_branch.as_deref() {
+                Some(b) if w >= 36 => format!(" {}", truncate(b, 12)),
+                _ => String::new(),
+            };
+            let name_w =
+                w.saturating_sub(pre.len() + 2 + branch.chars().count() + elapsed.len() + 1);
+            let name = truncate(&r.name, name_w);
+            let width = pre.len() + 2 + name.chars().count() + branch.chars().count();
+            let style = if r.is_active() {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            right_count(
+                vec![
+                    Span::raw(pre),
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
+                    Span::styled(name, style),
+                    Span::styled(branch, Style::default().fg(Color::DarkGray)),
+                ],
+                width,
+                elapsed,
+                w,
+            )
+        }
+        NodeKind::Check(c) => {
+            let (icon, color) = run_icon(&c.status, c.conclusion.as_deref());
+            let pre = " ".repeat(node.depth);
+            let name = fit(&c.name, w.saturating_sub(pre.len() + 2));
+            Line::from(vec![
+                Span::raw(pre),
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled(name, Style::default().fg(Color::DarkGray)),
+            ])
+        }
         NodeKind::Info(text) => {
             let pre = " ".repeat(node.depth);
-            Line::from(vec![Span::raw(pre.clone()), Span::styled(fit(text, w.saturating_sub(pre.len())), Style::default().fg(Color::DarkGray))])
+            Line::from(vec![
+                Span::raw(pre.clone()),
+                Span::styled(
+                    fit(text, w.saturating_sub(pre.len())),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
         }
     }
 }
@@ -468,38 +838,127 @@ mod tests {
     const NOW: u64 = 1_788_507_932; // 2026-09-04T07:45:32Z
 
     fn ms(number: u64, title: &str, state: &str, open: u64, closed: u64) -> Milestone {
-        Milestone { number, title: title.into(), state: state.into(), open_issues: open, closed_issues: closed, due_on: None, html_url: format!("https://m/{number}"), updated_at: String::new() }
+        Milestone {
+            number,
+            title: title.into(),
+            state: state.into(),
+            open_issues: open,
+            closed_issues: closed,
+            due_on: None,
+            html_url: format!("https://m/{number}"),
+            updated_at: String::new(),
+        }
     }
-    fn issue(number: u64, title: &str, state: &str, milestone: Option<u64>, closed_at: Option<&str>) -> Issue {
-        Issue { number, title: title.into(), state: state.into(), state_reason: (state == "closed").then(|| "completed".to_string()), milestone: milestone.map(|n| MilestoneRef { number: n }), labels: vec![], assignees: vec![], updated_at: String::new(), closed_at: closed_at.map(str::to_string), html_url: format!("https://i/{number}"), pull_request: None }
+    fn issue(
+        number: u64,
+        title: &str,
+        state: &str,
+        milestone: Option<u64>,
+        closed_at: Option<&str>,
+    ) -> Issue {
+        Issue {
+            number,
+            title: title.into(),
+            state: state.into(),
+            state_reason: (state == "closed").then(|| "completed".to_string()),
+            milestone: milestone.map(|n| MilestoneRef { number: n }),
+            labels: vec![],
+            assignees: vec![],
+            updated_at: String::new(),
+            closed_at: closed_at.map(str::to_string),
+            html_url: format!("https://i/{number}"),
+            pull_request: None,
+        }
     }
     fn pr(number: u64, draft: bool) -> PullRequest {
-        let repo = Some(RepoShort { full_name: "o/r".into() });
-        PullRequest { number, title: format!("PR {number}"), state: "open".into(), draft, merged_at: None, closed_at: None, head: GitRef { name: format!("branch-{number}"), sha: String::new(), repo: repo.clone() }, base: GitRef { name: "main".into(), sha: String::new(), repo }, user: None, updated_at: String::new(), html_url: format!("https://p/{number}"), body: None, extra: PrExtra::default() }
+        let repo = Some(RepoShort {
+            full_name: "o/r".into(),
+        });
+        PullRequest {
+            number,
+            title: format!("PR {number}"),
+            state: "open".into(),
+            draft,
+            merged_at: None,
+            closed_at: None,
+            head: GitRef {
+                name: format!("branch-{number}"),
+                sha: String::new(),
+                repo: repo.clone(),
+            },
+            base: GitRef {
+                name: "main".into(),
+                sha: String::new(),
+                repo,
+            },
+            user: None,
+            updated_at: String::new(),
+            html_url: format!("https://p/{number}"),
+            body: None,
+            extra: PrExtra::default(),
+        }
     }
     fn nodes(s: &Snapshot, st: &TreeState, now: u64) -> Vec<Node> {
         flatten(s, st, now, &[])
     }
     fn snap() -> Snapshot {
         Snapshot {
-            repo: RepoRef { owner: "o".into(), name: "r".into(), branch: None, root: String::new() },
-            milestones: vec![ms(2, "Second", "open", 1, 0), ms(1, "First", "open", 1, 1), ms(3, "Old", "closed", 0, 2)],
+            repo: RepoRef {
+                owner: "o".into(),
+                name: "r".into(),
+                branch: None,
+                root: String::new(),
+            },
+            milestones: vec![
+                ms(2, "Second", "open", 1, 0),
+                ms(1, "First", "open", 1, 1),
+                ms(3, "Old", "closed", 0, 2),
+            ],
             issues: vec![
                 issue(10, "in second", "open", Some(2), None),
-                issue(4, "first closed", "closed", Some(1), Some("2020-01-01T00:00:00Z")),
+                issue(
+                    4,
+                    "first closed",
+                    "closed",
+                    Some(1),
+                    Some("2020-01-01T00:00:00Z"),
+                ),
                 issue(5, "first open", "open", Some(1), None),
                 issue(7, "loose", "open", None, None),
-                issue(8, "just closed", "closed", None, Some("2026-09-04T00:00:00Z")), // ~8 h before NOW
-                issue(9, "closed 25h ago", "closed", None, Some("2026-09-03T06:45:00Z")),
+                issue(
+                    8,
+                    "just closed",
+                    "closed",
+                    None,
+                    Some("2026-09-04T00:00:00Z"),
+                ), // ~8 h before NOW
+                issue(
+                    9,
+                    "closed 25h ago",
+                    "closed",
+                    None,
+                    Some("2026-09-03T06:45:00Z"),
+                ),
             ],
             prs: vec![pr(20, false), pr(21, true)],
+            runs: vec![],
+            checks: Default::default(),
             fetched_at: SystemTime::now(),
             rate_remaining: None,
             authenticated: true,
         }
     }
     fn texts(nodes: &[Node], w: usize) -> Vec<String> {
-        nodes.iter().map(|n| render(n, w).spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+        nodes
+            .iter()
+            .map(|n| {
+                render(n, w)
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -517,17 +976,30 @@ mod tests {
         assert_eq!(ids[5], &NodeId::Issue(4));
         assert_eq!(ids[6], &NodeId::Milestone(2));
         assert_eq!(ids[7], &NodeId::Issue(10));
-        assert_eq!(ids[8], &NodeId::ClosedMilestones, "closed milestones collapsed by default");
+        assert_eq!(
+            ids[8],
+            &NodeId::ClosedMilestones,
+            "closed milestones collapsed by default"
+        );
         assert_eq!(ids[9], &NodeId::Section(Section::Issues));
         assert_eq!(ids[10], &NodeId::Issue(7));
         assert_eq!(ids[11], &NodeId::RecentlyClosed);
         assert_eq!(ids[12], &NodeId::Section(Section::PullRequests));
         assert_eq!(ids[13], &NodeId::Pr(20));
-        assert_eq!(ids.len(), 15);
-        assert!(t[3].starts_with(" ▾ First") && t[3].ends_with("1/2"), "{:?}", t[3]);
+        assert_eq!(ids[15], &NodeId::Section(Section::Actions));
+        assert_eq!(ids[16], &NodeId::NoRuns, "no runs placeholder");
+        assert_eq!(ids.len(), 17);
+        assert!(
+            t[3].starts_with(" ▾ First") && t[3].ends_with("1/2"),
+            "{:?}",
+            t[3]
+        );
         assert!(t[2].starts_with("▾ MILESTONES") && t[2].ends_with(" 2"));
         assert!(t[0].ends_with("idle"), "{:?}", t[0]);
-        assert_eq!(nodes[2].url.as_deref(), Some("https://github.com/o/r/milestones"));
+        assert_eq!(
+            nodes[2].url.as_deref(),
+            Some("https://github.com/o/r/milestones")
+        );
         assert_eq!(nodes[3].url.as_deref(), Some("https://m/1"));
         assert_eq!(nodes[4].url.as_deref(), Some("https://i/5"));
         assert_eq!(nodes[13].url.as_deref(), Some("https://p/20"));
@@ -548,11 +1020,19 @@ mod tests {
         assert!(ids.contains(&NodeId::Issue(8)), "closed 8 h ago is recent");
         assert!(!ids.contains(&NodeId::Issue(9)), "closed 25 h ago is not");
         // 20 h later #8 also ages out and the group disappears.
-        let ids: Vec<NodeId> = nodes(&s, &st, NOW + 20 * 3600).into_iter().map(|n| n.id).collect();
+        let ids: Vec<NodeId> = nodes(&s, &st, NOW + 20 * 3600)
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
         assert!(!ids.contains(&NodeId::RecentlyClosed));
         st.toggle(&NodeId::Section(Section::Milestones));
         let ids: Vec<NodeId> = nodes(&s, &st, NOW).into_iter().map(|n| n.id).collect();
-        assert_eq!(ids.iter().filter(|i| matches!(i, NodeId::Milestone(_))).count(), 0);
+        assert_eq!(
+            ids.iter()
+                .filter(|i| matches!(i, NodeId::Milestone(_)))
+                .count(),
+            0
+        );
         st.set_open(&NodeId::Section(Section::Milestones), true);
         assert!(st.is_open(&NodeId::Section(Section::Milestones)));
     }
@@ -560,7 +1040,9 @@ mod tests {
     #[test]
     fn rows_fill_width_exactly_and_show_bar_and_initials() {
         let mut s = snap();
-        s.issues[2].assignees = vec![User { login: "some-one".into() }];
+        s.issues[2].assignees = vec![User {
+            login: "some-one".into(),
+        }];
         let nodes = nodes(&s, &TreeState::default(), NOW);
         for w in [26usize, 32, 40] {
             let t = texts(&nodes, w);
@@ -570,7 +1052,12 @@ mod tests {
         assert!(t[3].contains("▓▓▓░░░"), "{:?}", t[3]);
         assert!(t[4].ends_with(" SO"), "{:?}", t[4]);
         let t = texts(&nodes, 26);
-        assert!(!t[3].contains('▓') && !t[4].contains("SO"), "{:?} {:?}", t[3], t[4]);
+        assert!(
+            !t[3].contains('▓') && !t[4].contains("SO"),
+            "{:?} {:?}",
+            t[3],
+            t[4]
+        );
     }
 
     #[test]
@@ -587,28 +1074,145 @@ mod tests {
         s.repo.branch = Some("branch-20".into());
         s.prs[0].extra.closes = vec![5];
         assert_eq!(current_pr(&s).map(|p| p.number), Some(20));
-        assert_eq!(active_issue(&s), Some(5), "falls back to the branch PR's closing issue");
+        assert_eq!(
+            active_issue(&s),
+            Some(5),
+            "falls back to the branch PR's closing issue"
+        );
         s.repo.branch = Some("issue-10-x".into());
         assert_eq!(active_issue(&s), Some(10), "branch name wins");
         // A fork PR whose head happens to share our branch name is not ours.
         s.repo.branch = Some("branch-20".into());
-        s.prs[0].head.repo = Some(RepoShort { full_name: "someone/r".into() });
+        s.prs[0].head.repo = Some(RepoShort {
+            full_name: "someone/r".into(),
+        });
         assert!(current_pr(&s).is_none());
         s.prs[0].head.repo = None;
         assert!(current_pr(&s).is_none());
+    }
+
+    fn run(
+        id: u64,
+        status: &str,
+        conclusion: Option<&str>,
+        started: &str,
+        updated: &str,
+    ) -> WorkflowRun {
+        WorkflowRun {
+            id,
+            name: "Continuous Integration".into(),
+            display_title: None,
+            status: status.into(),
+            conclusion: conclusion.map(str::to_string),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: "abc".into(),
+            run_number: id,
+            run_started_at: Some(started.into()),
+            updated_at: updated.into(),
+            html_url: format!("https://a/{id}"),
+        }
+    }
+
+    #[test]
+    fn actions_section_and_active_runs_in_now() {
+        let mut s = snap();
+        s.runs = vec![
+            run(
+                2,
+                "in_progress",
+                None,
+                "2026-09-04T07:40:32Z",
+                "2026-09-04T07:41:00Z",
+            ),
+            run(
+                1,
+                "completed",
+                Some("failure"),
+                "2026-09-04T06:00:00Z",
+                "2026-09-04T06:04:05Z",
+            ),
+        ];
+        s.checks.insert(
+            "abc".into(),
+            vec![CheckRun {
+                id: 7,
+                name: "build".into(),
+                status: "completed".into(),
+                conclusion: Some("success".into()),
+                html_url: Some("https://c/7".into()),
+                started_at: None,
+                completed_at: None,
+            }],
+        );
+        s.prs[0].head.sha = "abc".into();
+        let mut st = TreeState::default();
+        st.toggle(&NodeId::Pr(20));
+        let nodes = flatten(&s, &st, NOW, &[]);
+        let t = texts(&nodes, 26);
+        assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
+        assert!(
+            t[0].ends_with("1 busy"),
+            "active run counts as busy: {:?}",
+            t[0]
+        );
+        assert_eq!(nodes[1].id, NodeId::NowRun(2));
+        assert!(t[1].starts_with(" ◐ Continuous"), "{:?}", t[1]);
+        assert!(t[1].ends_with("5m"), "elapsed to NOW: {:?}", t[1]);
+        let a = nodes
+            .iter()
+            .position(|n| n.id == NodeId::Section(Section::Actions))
+            .unwrap();
+        assert!(t[a].ends_with("1 active"), "{:?}", t[a]);
+        assert_eq!(nodes[a + 1].id, NodeId::Run(2));
+        assert_eq!(nodes[a + 2].id, NodeId::Run(1));
+        assert!(
+            t[a + 2].starts_with(" ✗ Continuous") && t[a + 2].ends_with("4m"),
+            "duration: {:?}",
+            t[a + 2]
+        );
+        assert_eq!(nodes[a + 2].url.as_deref(), Some("https://a/1"));
+        // Expanded PR lists its check runs after the branch line.
+        let p20 = nodes.iter().position(|n| n.id == NodeId::Pr(20)).unwrap();
+        assert_eq!(nodes[p20 + 2].id, NodeId::PrCheck(20, 7));
+        assert!(t[p20 + 2].contains("✓ build"), "{:?}", t[p20 + 2]);
+        assert_eq!(nodes[p20 + 2].url.as_deref(), Some("https://c/7"));
+        // Wider panes show the branch on run rows.
+        let t = texts(&nodes, 40);
+        assert!(t[a + 1].contains(" main"), "{:?}", t[a + 1]);
+        assert!(t.iter().all(|l| l.chars().count() == 40), "{t:?}");
+    }
+
+    #[test]
+    fn run_icons_cover_github_states() {
+        assert_eq!(run_icon("queued", None).0, "◌");
+        assert_eq!(run_icon("in_progress", None).0, "◐");
+        assert_eq!(run_icon("completed", Some("success")).0, "✓");
+        assert_eq!(run_icon("completed", Some("failure")).0, "✗");
+        assert_eq!(run_icon("completed", Some("cancelled")).0, "⊘");
+        assert_eq!(run_icon("completed", Some("skipped")).0, "→");
+        assert_eq!(run_icon("completed", Some("action_required")).0, "!");
+        assert_eq!(run_icon("weird", None).0, "?");
     }
 
     #[test]
     fn now_section_on_main_with_idle_agent() {
         let mut s = snap();
         s.repo.branch = Some("main".into());
-        let agents = vec![AgentInfo { pane_id: "w1:p1".into(), agent: "claude".into(), status: "idle".into(), title: None }];
+        let agents = vec![AgentInfo {
+            pane_id: "w1:p1".into(),
+            agent: "claude".into(),
+            status: "idle".into(),
+            title: None,
+        }];
         let nodes = flatten(&s, &TreeState::default(), NOW, &agents);
         let t = texts(&nodes, 26);
         assert!(t[0].ends_with("idle"), "{:?}", t[0]);
         assert_eq!(nodes[1].id, NodeId::Idle);
         assert!(matches!(nodes[2].id, NodeId::Agent(_)));
-        assert!(!nodes.iter().any(|n| matches!(n.id, NodeId::NowPr(_) | NodeId::NowIssue(_))));
+        assert!(!nodes
+            .iter()
+            .any(|n| matches!(n.id, NodeId::NowPr(_) | NodeId::NowIssue(_))));
         // A branch whose issue is out of view still counts as active.
         s.repo.branch = Some("issue-99-x".into());
         let nodes = flatten(&s, &TreeState::default(), NOW, &[]);
@@ -623,23 +1227,45 @@ mod tests {
     fn now_section_and_pr_rows() {
         let mut s = snap();
         s.repo.branch = Some("branch-20".into());
-        s.prs[0].extra = PrExtra { review: Some("APPROVED".into()), checks: Some(Checks { state: "PENDING".into(), total: 2, failed: 0, pending: 1 }), closes: vec![5] };
+        s.prs[0].extra = PrExtra {
+            review: Some("APPROVED".into()),
+            checks: Some(Checks {
+                state: "PENDING".into(),
+                total: 2,
+                failed: 0,
+                pending: 1,
+            }),
+            closes: vec![5],
+        };
         s.prs[1].state = "closed".into();
         s.prs[1].merged_at = Some("2026-09-04T06:00:00Z".into());
         s.prs[1].closed_at = Some("2026-09-04T06:00:00Z".into());
-        let agents = vec![AgentInfo { pane_id: "w1:p1".into(), agent: "claude".into(), status: "working".into(), title: Some("Fixing tests".into()) }];
+        let agents = vec![AgentInfo {
+            pane_id: "w1:p1".into(),
+            agent: "claude".into(),
+            status: "working".into(),
+            title: Some("Fixing tests".into()),
+        }];
         let mut st = TreeState::default();
         st.toggle(&NodeId::Pr(20));
         let nodes = flatten(&s, &st, NOW, &agents);
         let t = texts(&nodes, 26);
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
-        assert!(t[0].starts_with("▾ NOW") && t[0].ends_with("1 busy"), "{:?}", t[0]);
+        assert!(
+            t[0].starts_with("▾ NOW") && t[0].ends_with("1 busy"),
+            "{:?}",
+            t[0]
+        );
         assert_eq!(nodes[1].id, NodeId::NowIssue(5));
         assert!(t[1].starts_with(" ▶ #5"), "active issue marker: {:?}", t[1]);
         assert_eq!(nodes[2].id, NodeId::NowPr(20));
         assert!(t[2].ends_with(" A◔"), "review + pending checks: {:?}", t[2]);
         assert_eq!(nodes[3].id, NodeId::Agent("w1:p1".into()));
-        assert!(t[3].starts_with(" ◐ claude") && t[3].ends_with("working"), "{:?}", t[3]);
+        assert!(
+            t[3].starts_with(" ◐ claude") && t[3].ends_with("working"),
+            "{:?}",
+            t[3]
+        );
         // The milestone tree marks the active issue too.
         let i5 = nodes.iter().position(|n| n.id == NodeId::Issue(5)).unwrap();
         assert!(t[i5].contains("▶ #5"), "{:?}", t[i5]);
@@ -647,10 +1273,20 @@ mod tests {
         let p20 = nodes.iter().position(|n| n.id == NodeId::Pr(20)).unwrap();
         assert_eq!(nodes[p20 + 1].id, NodeId::PrDetail(20, 0));
         assert!(t[p20 + 1].contains("branch-20 → main"), "{:?}", t[p20 + 1]);
-        assert!(t[p20 + 2].contains("closes #5 first open"), "{:?}", t[p20 + 2]);
-        assert_eq!(nodes[p20 + 2].url.as_deref(), Some("https://github.com/o/r/issues/5"));
+        assert!(
+            t[p20 + 2].contains("closes #5 first open"),
+            "{:?}",
+            t[p20 + 2]
+        );
+        assert_eq!(
+            nodes[p20 + 2].url.as_deref(),
+            Some("https://github.com/o/r/issues/5")
+        );
         // Merged PR sits in the recently merged/closed group.
-        let g = nodes.iter().position(|n| n.id == NodeId::RecentPrs).unwrap();
+        let g = nodes
+            .iter()
+            .position(|n| n.id == NodeId::RecentPrs)
+            .unwrap();
         assert!(t[g].contains("recently merged"), "{:?}", t[g]);
         st.toggle(&NodeId::RecentPrs);
         let nodes = flatten(&s, &st, NOW, &agents);

@@ -8,7 +8,13 @@ use ratatui::text::{Line, Span};
 pub const ROWS: u16 = 2;
 
 fn badge() -> Span<'static> {
-    Span::styled(" status ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+    Span::styled(
+        " status ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 pub fn lines(app: &App, w: usize) -> Vec<Line<'static>> {
@@ -16,15 +22,28 @@ pub fn lines(app: &App, w: usize) -> Vec<Line<'static>> {
     match &app.snapshot {
         Some(s) => {
             let name = truncate(&s.repo.full_name(), w.saturating_sub(9));
-            lines.push(Line::from(vec![badge(), Span::raw(" "), Span::styled(name, Style::default().add_modifier(Modifier::BOLD))]));
+            lines.push(Line::from(vec![
+                badge(),
+                Span::raw(" "),
+                Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+            ]));
             let branch = s.repo.branch.clone().unwrap_or_else(|| "detached".into());
             // Trailing markers are reserved first so they are always visible.
-            let mut suffix = vec![Span::styled(age_string(s.fetched_at), Style::default().fg(Color::DarkGray))];
+            let mut suffix = vec![Span::styled(
+                age_string(s.fetched_at),
+                Style::default().fg(Color::DarkGray),
+            )];
             if !s.authenticated {
-                suffix.push(Span::styled(" no-token", Style::default().fg(Color::Yellow)));
+                suffix.push(Span::styled(
+                    " no-token",
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             if let Status::Error(_) = app.status {
-                suffix.push(Span::styled(" !", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+                suffix.push(Span::styled(
+                    " !",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
             }
             let suffix_width: usize = suffix.iter().map(|s| s.content.chars().count()).sum();
             let mut meta = vec![
@@ -43,7 +62,10 @@ pub fn lines(app: &App, w: usize) -> Vec<Line<'static>> {
                 Status::Error(e) => format!("error: {e}"),
                 Status::Ok => String::new(),
             };
-            lines.push(Line::from(Span::styled(truncate(&msg, w), Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                truncate(&msg, w),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     }
     lines

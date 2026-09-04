@@ -109,24 +109,41 @@ pub struct PrExtra {
 impl PrExtra {
     /// `(number, extra)` pairs from the GraphQL `pullRequests` query (see `github::PR_EXTRA_QUERY`).
     pub fn from_graphql(value: &serde_json::Value) -> Vec<(u64, PrExtra)> {
-        let Some(nodes) = value.pointer("/data/repository/pullRequests/nodes").and_then(|n| n.as_array()) else {
+        let Some(nodes) = value
+            .pointer("/data/repository/pullRequests/nodes")
+            .and_then(|n| n.as_array())
+        else {
             return Vec::new();
         };
         nodes
             .iter()
             .filter_map(|n| {
                 let number = n.get("number")?.as_u64()?;
-                let review = n.get("reviewDecision").and_then(|v| v.as_str()).map(str::to_string);
+                let review = n
+                    .get("reviewDecision")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let closes = n
                     .pointer("/closingIssuesReferences/nodes")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|i| i.get("number").and_then(|x| x.as_u64())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|i| i.get("number").and_then(|x| x.as_u64()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let checks = n
                     .pointer("/commits/nodes/0/commit/statusCheckRollup")
                     .filter(|r| !r.is_null())
                     .map(Checks::from_rollup);
-                Some((number, PrExtra { review, checks, closes }))
+                Some((
+                    number,
+                    PrExtra {
+                        review,
+                        checks,
+                        closes,
+                    },
+                ))
             })
             .collect()
     }
@@ -135,7 +152,11 @@ impl PrExtra {
 impl Checks {
     /// Summarize a GraphQL `statusCheckRollup`: check runs and status contexts.
     pub fn from_rollup(rollup: &serde_json::Value) -> Checks {
-        let contexts = rollup.pointer("/contexts/nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let contexts = rollup
+            .pointer("/contexts/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut failed = 0;
         let mut pending = 0;
         for c in &contexts {
@@ -154,8 +175,15 @@ impl Checks {
             }
         }
         Checks {
-            state: rollup.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            total: rollup.pointer("/contexts/totalCount").and_then(|v| v.as_u64()).unwrap_or(contexts.len() as u64) as usize,
+            state: rollup
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            total: rollup
+                .pointer("/contexts/totalCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(contexts.len() as u64) as usize,
             failed,
             pending,
         }
@@ -167,7 +195,10 @@ impl Checks {
 pub fn review_decision(reviews: &[Review]) -> Option<String> {
     let mut latest: Vec<(&str, &str)> = Vec::new();
     for r in reviews {
-        if !matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+        if !matches!(
+            r.state.as_str(),
+            "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+        ) {
             continue;
         }
         let login = r.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
@@ -226,7 +257,9 @@ impl PullRequest {
 
 /// Issue numbers referenced by closing keywords (`closes #12`, `Fixes: #3`, `resolved #7`).
 pub fn closing_refs(body: &str) -> Vec<u64> {
-    const KEYWORDS: [&str; 9] = ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"];
+    const KEYWORDS: [&str; 9] = [
+        "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+    ];
     let mut out = Vec::new();
     let words: Vec<&str> = body.split_whitespace().collect();
     for pair in words.windows(2) {
@@ -247,6 +280,82 @@ pub fn closing_refs(body: &str) -> Vec<u64> {
     out
 }
 
+/// A GitHub Actions workflow run.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub display_title: Option<String>,
+    /// queued | in_progress | completed | waiting | requested | pending
+    pub status: String,
+    /// success | failure | cancelled | skipped | timed_out | action_required | neutral | stale
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub head_branch: Option<String>,
+    #[serde(default)]
+    pub head_sha: String,
+    #[serde(default)]
+    pub run_number: u64,
+    #[serde(default)]
+    pub run_started_at: Option<String>,
+    pub updated_at: String,
+    pub html_url: String,
+}
+
+impl WorkflowRun {
+    pub fn is_active(&self) -> bool {
+        self.status != "completed"
+    }
+}
+
+/// A check run on a commit (one job of a workflow, or an external app's check).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CheckRun {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+impl Checks {
+    /// Summarize REST check runs the way `from_rollup` summarizes GraphQL contexts.
+    pub fn from_check_runs(runs: &[CheckRun]) -> Checks {
+        let mut failed = 0;
+        let mut pending = 0;
+        for r in runs {
+            match (r.status.as_str(), r.conclusion.as_deref().unwrap_or("")) {
+                ("completed", "success" | "neutral" | "skipped") => {}
+                ("completed", _) => failed += 1,
+                _ => pending += 1,
+            }
+        }
+        let state = if failed > 0 {
+            "FAILURE"
+        } else if pending > 0 {
+            "PENDING"
+        } else {
+            "SUCCESS"
+        };
+        Checks {
+            state: state.into(),
+            total: runs.len(),
+            failed,
+            pending,
+        }
+    }
+}
+
 /// A herdr agent running in this workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentInfo {
@@ -263,6 +372,10 @@ pub struct Snapshot {
     pub milestones: Vec<Milestone>,
     pub issues: Vec<Issue>,
     pub prs: Vec<PullRequest>,
+    /// Most recent workflow runs, newest first.
+    pub runs: Vec<WorkflowRun>,
+    /// Check runs by head SHA for open PRs.
+    pub checks: std::collections::HashMap<String, Vec<CheckRun>>,
     pub fetched_at: SystemTime,
     pub rate_remaining: Option<u32>,
     pub authenticated: bool,
@@ -275,6 +388,10 @@ impl Snapshot {
     pub fn open_prs(&self) -> usize {
         self.prs.iter().filter(|p| p.is_open()).count()
     }
+    /// Any workflow run still queued or running.
+    pub fn has_active_runs(&self) -> bool {
+        self.runs.iter().any(WorkflowRun::is_active)
+    }
 }
 
 #[cfg(test)]
@@ -283,11 +400,17 @@ mod tests {
 
     #[test]
     fn parses_closing_keywords() {
-        assert_eq!(closing_refs("Fixes #12 and closes #7, resolves: #7. Refs #9. close #x"), vec![12, 7]);
+        assert_eq!(
+            closing_refs("Fixes #12 and closes #7, resolves: #7. Refs #9. close #x"),
+            vec![12, 7]
+        );
         assert_eq!(closing_refs("Closes #3\n\nCo-Authored-By: x"), vec![3]);
         assert_eq!(closing_refs("closes (#5) and fixes [#6]"), vec![5, 6]);
         assert!(closing_refs("nothing here #4").is_empty());
-        assert!(closing_refs("Closes other/repo#7").is_empty(), "cross-repo refs are not local issues");
+        assert!(
+            closing_refs("Closes other/repo#7").is_empty(),
+            "cross-repo refs are not local issues"
+        );
     }
 
     #[test]
@@ -309,19 +432,70 @@ mod tests {
         assert_eq!(e.review.as_deref(), Some("APPROVED"));
         assert_eq!(e.closes, vec![1, 2]);
         let c = e.checks.as_ref().unwrap();
-        assert_eq!((c.state.as_str(), c.total, c.failed, c.pending), ("FAILURE", 3, 1, 1));
+        assert_eq!(
+            (c.state.as_str(), c.total, c.failed, c.pending),
+            ("FAILURE", 3, 1, 1)
+        );
         assert!(extras[1].1.checks.is_none() && extras[1].1.review.is_none());
         assert!(PrExtra::from_graphql(&serde_json::json!({})).is_empty());
     }
 
     #[test]
+    fn summarizes_check_runs() {
+        let run = |status: &str, conclusion: Option<&str>| CheckRun {
+            id: 1,
+            name: "x".into(),
+            status: status.into(),
+            conclusion: conclusion.map(str::to_string),
+            html_url: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let c = Checks::from_check_runs(&[
+            run("completed", Some("success")),
+            run("in_progress", None),
+            run("completed", Some("failure")),
+            run("completed", Some("skipped")),
+        ]);
+        assert_eq!(
+            (c.state.as_str(), c.total, c.failed, c.pending),
+            ("FAILURE", 4, 1, 1)
+        );
+        assert_eq!(
+            Checks::from_check_runs(&[run("completed", Some("success"))]).state,
+            "SUCCESS"
+        );
+        assert_eq!(
+            Checks::from_check_runs(&[run("queued", None)]).state,
+            "PENDING"
+        );
+    }
+
+    #[test]
     fn derives_review_decision_from_rest_reviews() {
-        let r = |state: &str, login: &str| Review { state: state.into(), user: Some(User { login: login.into() }) };
+        let r = |state: &str, login: &str| Review {
+            state: state.into(),
+            user: Some(User {
+                login: login.into(),
+            }),
+        };
         assert_eq!(review_decision(&[r("COMMENTED", "a")]), None);
-        assert_eq!(review_decision(&[r("APPROVED", "a")]).as_deref(), Some("APPROVED"));
-        assert_eq!(review_decision(&[r("APPROVED", "a"), r("CHANGES_REQUESTED", "b")]).as_deref(), Some("CHANGES_REQUESTED"));
+        assert_eq!(
+            review_decision(&[r("APPROVED", "a")]).as_deref(),
+            Some("APPROVED")
+        );
+        assert_eq!(
+            review_decision(&[r("APPROVED", "a"), r("CHANGES_REQUESTED", "b")]).as_deref(),
+            Some("CHANGES_REQUESTED")
+        );
         // The latest review per user wins.
-        assert_eq!(review_decision(&[r("CHANGES_REQUESTED", "b"), r("APPROVED", "b")]).as_deref(), Some("APPROVED"));
-        assert_eq!(review_decision(&[r("APPROVED", "b"), r("DISMISSED", "b")]), None);
+        assert_eq!(
+            review_decision(&[r("CHANGES_REQUESTED", "b"), r("APPROVED", "b")]).as_deref(),
+            Some("APPROVED")
+        );
+        assert_eq!(
+            review_decision(&[r("APPROVED", "b"), r("DISMISSED", "b")]),
+            None
+        );
     }
 }

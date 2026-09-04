@@ -1,11 +1,15 @@
 //! GitHub REST + GraphQL client: token discovery, paginated GETs, rate-limit tracking, and
 //! the per-refresh PR enrichment query.
 
-use crate::model::{closing_refs, review_decision, Issue, Milestone, PrExtra, PullRequest, Review, Snapshot};
+use crate::model::{
+    closing_refs, review_decision, CheckRun, Checks, Issue, Milestone, PrExtra, PullRequest,
+    Review, Snapshot, WorkflowRun,
+};
 use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -33,6 +37,22 @@ const PR_EXTRA_QUERY: &str = r#"query($owner:String!,$name:String!){
   }
 }"#;
 const MAX_ISSUE_PAGES: usize = 3;
+/// Workflow runs shown in the Actions section.
+pub const RUNS_LIMIT: usize = 15;
+/// Open PR heads whose check runs are fetched per refresh (authenticated).
+const CHECKS_PR_LIMIT: usize = 5;
+
+#[derive(Deserialize)]
+struct RunsPage {
+    #[serde(default)]
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRunsPage {
+    #[serde(default)]
+    check_runs: Vec<CheckRun>,
+}
 
 pub struct Client {
     agent: Agent,
@@ -61,7 +81,11 @@ pub struct RateLimited {
 
 impl std::fmt::Display for RateLimited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let secs = self.until.duration_since(SystemTime::now()).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = self
+            .until
+            .duration_since(SystemTime::now())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         write!(f, "GitHub rate limit reached; retrying in {secs}s")
     }
 }
@@ -79,7 +103,12 @@ pub struct Page<T> {
 
 /// When to retry after a 403/429: `Retry-After` seconds (secondary limit), else the primary
 /// limit's reset time when the remaining budget is exhausted, else `None` (a plain 403).
-pub fn rate_limit_until(status: u16, retry_after: Option<u64>, reset_epoch: Option<u64>, remaining: Option<u32>) -> Option<SystemTime> {
+pub fn rate_limit_until(
+    status: u16,
+    retry_after: Option<u64>,
+    reset_epoch: Option<u64>,
+    remaining: Option<u32>,
+) -> Option<SystemTime> {
     if let Some(secs) = retry_after {
         return Some(SystemTime::now() + Duration::from_secs(secs.max(1)));
     }
@@ -94,8 +123,12 @@ pub fn rate_limit_until(status: u16, retry_after: Option<u64>, reset_epoch: Opti
 pub fn next_link(link: &str) -> Option<String> {
     link.split(',').find_map(|part| {
         let (url, rel) = part.split_once(';')?;
-        rel.contains("rel=\"next\"")
-            .then(|| url.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+        rel.contains("rel=\"next\"").then(|| {
+            url.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string()
+        })
     })
 }
 
@@ -107,7 +140,11 @@ impl Client {
             .timeout_global(Some(Duration::from_secs(15)))
             .user_agent(concat!("herdr-github-status/", env!("CARGO_PKG_VERSION")))
             .build();
-        Self { agent: Agent::new_with_config(config), token, rate_remaining: None }
+        Self {
+            agent: Agent::new_with_config(config),
+            token,
+            rate_remaining: None,
+        }
     }
 
     pub fn authenticated(&self) -> bool {
@@ -127,7 +164,11 @@ impl Client {
     }
 
     /// `Ok(Err(location))` signals a redirect to follow.
-    fn get_once<T: DeserializeOwned>(&mut self, url: &str, etag: Option<&str>) -> Result<std::result::Result<Page<T>, String>> {
+    fn get_once<T: DeserializeOwned>(
+        &mut self,
+        url: &str,
+        etag: Option<&str>,
+    ) -> Result<std::result::Result<Page<T>, String>> {
         let mut req = self
             .agent
             .get(url)
@@ -156,13 +197,26 @@ impl Client {
         let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<u64>().ok());
         let remaining = header("x-ratelimit-remaining").and_then(|v| v.parse::<u32>().ok());
         let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string().context("reading response body")?;
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .context("reading response body")?;
         match status {
-            200 => Ok(Ok(Page { items: Some(serde_json::from_str(&body).context("decoding JSON")?), etag, next })),
-            304 => Ok(Ok(Page { items: None, etag, next })),
+            200 => Ok(Ok(Page {
+                items: Some(serde_json::from_str(&body).context("decoding JSON")?),
+                etag,
+                next,
+            })),
+            304 => Ok(Ok(Page {
+                items: None,
+                etag,
+                next,
+            })),
             301 | 307 | 308 => match location {
                 Some(l) if l.starts_with(API) => Ok(Err(l)),
-                _ => bail!("repository was renamed or moved (HTTP {status}); update the git remote"),
+                _ => {
+                    bail!("repository was renamed or moved (HTTP {status}); update the git remote")
+                }
             },
             401 => bail!("GitHub rejected the token (401)"),
             403 | 429 => {
@@ -195,8 +249,15 @@ impl Client {
     }
 
     /// POST a GraphQL query; requires a token.
-    pub fn graphql(&mut self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value> {
-        let token = self.token.clone().ok_or_else(|| anyhow!("GraphQL needs a token"))?;
+    pub fn graphql(
+        &mut self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let token = self
+            .token
+            .clone()
+            .ok_or_else(|| anyhow!("GraphQL needs a token"))?;
         let body = serde_json::json!({ "query": query, "variables": variables });
         let mut resp = self
             .agent
@@ -206,13 +267,24 @@ impl Client {
             .send(body.to_string().as_bytes())
             .context("POST graphql")?;
         let status = resp.status().as_u16();
-        let text = resp.body_mut().read_to_string().context("reading GraphQL body")?;
+        let text = resp
+            .body_mut()
+            .read_to_string()
+            .context("reading GraphQL body")?;
         if status != 200 {
             bail!("GraphQL returned HTTP {status}");
         }
-        let value: serde_json::Value = serde_json::from_str(&text).context("decoding GraphQL JSON")?;
-        if let Some(errors) = value.get("errors").and_then(|e| e.as_array()).filter(|e| !e.is_empty()) {
-            let msg = errors[0].get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+        let value: serde_json::Value =
+            serde_json::from_str(&text).context("decoding GraphQL JSON")?;
+        if let Some(errors) = value
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .filter(|e| !e.is_empty())
+        {
+            let msg = errors[0]
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
             bail!("GraphQL error: {msg}");
         }
         Ok(value)
@@ -229,9 +301,14 @@ impl Client {
             return;
         }
         let vars = serde_json::json!({ "owner": repo.owner, "name": repo.name });
-        let graphql = if self.authenticated() { self.graphql(PR_EXTRA_QUERY, vars).ok() } else { None };
+        let graphql = if self.authenticated() {
+            self.graphql(PR_EXTRA_QUERY, vars).ok()
+        } else {
+            None
+        };
         if let Some(value) = graphql {
-            let mut extras: HashMap<u64, PrExtra> = PrExtra::from_graphql(&value).into_iter().collect();
+            let mut extras: HashMap<u64, PrExtra> =
+                PrExtra::from_graphql(&value).into_iter().collect();
             for p in prs.iter_mut() {
                 if let Some(mut extra) = extras.remove(&p.number) {
                     if extra.closes.is_empty() {
@@ -242,13 +319,70 @@ impl Client {
             }
             return;
         }
-        let Some(branch) = repo.branch.as_deref() else { return };
-        if let Some(p) = prs.iter_mut().find(|p| p.is_open() && p.head.name == branch) {
-            let url = format!("{API}/repos/{}/{}/pulls/{}/reviews?per_page=100", repo.owner, repo.name, p.number);
+        let Some(branch) = repo.branch.as_deref() else {
+            return;
+        };
+        if let Some(p) = prs
+            .iter_mut()
+            .find(|p| p.is_open() && p.head.name == branch)
+        {
+            let url = format!(
+                "{API}/repos/{}/{}/pulls/{}/reviews?per_page=100",
+                repo.owner, repo.name, p.number
+            );
             if let Ok(page) = self.get::<Vec<Review>>(&url, None) {
                 p.extra.review = review_decision(&page.items.unwrap_or_default());
             }
         }
+    }
+
+    /// Check runs for open PR heads (the current branch's PR first), filling a missing
+    /// `extra.checks` from them. Failures leave that head out of the map.
+    fn fetch_checks(
+        &mut self,
+        repo: &RepoRef,
+        prs: &mut [PullRequest],
+    ) -> HashMap<String, Vec<CheckRun>> {
+        let branch = repo.branch.as_deref();
+        let mut heads: Vec<String> = prs
+            .iter()
+            .filter(|p| p.is_open())
+            .filter(|p| self.authenticated() || branch.is_some_and(|b| p.head.name == b))
+            .map(|p| p.head.sha.clone())
+            .filter(|sha| !sha.is_empty())
+            .collect();
+        // The current branch's PR first, then the most recently updated ones.
+        if let Some(b) = branch {
+            if let Some(i) = prs
+                .iter()
+                .filter(|p| p.is_open() && !p.head.sha.is_empty())
+                .position(|p| p.head.name == b)
+            {
+                let sha = prs[i].head.sha.clone();
+                heads.retain(|s| *s != sha);
+                heads.insert(0, sha);
+            }
+        }
+        heads.dedup();
+        heads.truncate(CHECKS_PR_LIMIT);
+        let mut out = HashMap::new();
+        for sha in heads {
+            let url = format!(
+                "{API}/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
+                repo.owner, repo.name
+            );
+            if let Ok(page) = self.get::<CheckRunsPage>(&url, None) {
+                out.insert(sha, page.items.map(|p| p.check_runs).unwrap_or_default());
+            }
+        }
+        for p in prs.iter_mut() {
+            if p.extra.checks.is_none() {
+                if let Some(runs) = out.get(&p.head.sha).filter(|r| !r.is_empty()) {
+                    p.extra.checks = Some(Checks::from_check_runs(runs));
+                }
+            }
+        }
+        out
     }
 
     pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
@@ -263,14 +397,23 @@ impl Client {
             .into_iter()
             .filter(|i| i.pull_request.is_none())
             .collect();
-        let mut prs: Vec<PullRequest> =
-            self.get_all(&format!("{base}/pulls?state=all&per_page=50&sort=updated&direction=desc"), 1)?;
+        let mut prs: Vec<PullRequest> = self.get_all(
+            &format!("{base}/pulls?state=all&per_page=50&sort=updated&direction=desc"),
+            1,
+        )?;
         self.enrich_prs(repo, &mut prs);
+        let runs = self
+            .get::<RunsPage>(&format!("{base}/actions/runs?per_page={RUNS_LIMIT}"), None)
+            .map(|page| page.items.map(|p| p.workflow_runs).unwrap_or_default())
+            .unwrap_or_default();
+        let checks = self.fetch_checks(repo, &mut prs);
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
             issues,
             prs,
+            runs,
+            checks,
             fetched_at: SystemTime::now(),
             rate_remaining: self.rate_remaining,
             authenticated: self.authenticated(),
@@ -289,15 +432,25 @@ mod tests {
         let ra = rate_limit_until(403, Some(30), None, Some(10)).unwrap();
         assert!(ra >= now + Duration::from_secs(29));
         let reset = 4_000_000_000u64;
-        assert_eq!(rate_limit_until(403, None, Some(reset), Some(0)), Some(UNIX_EPOCH + Duration::from_secs(reset)));
-        assert_eq!(rate_limit_until(403, None, Some(reset), Some(5)), None, "plain 403 is not a rate limit");
+        assert_eq!(
+            rate_limit_until(403, None, Some(reset), Some(0)),
+            Some(UNIX_EPOCH + Duration::from_secs(reset))
+        );
+        assert_eq!(
+            rate_limit_until(403, None, Some(reset), Some(5)),
+            None,
+            "plain 403 is not a rate limit"
+        );
         assert!(rate_limit_until(429, None, None, None).is_some());
     }
 
     #[test]
     fn parses_next_link() {
         let link = r#"<https://api.github.com/repositories/1/issues?page=2>; rel="next", <https://api.github.com/repositories/1/issues?page=5>; rel="last""#;
-        assert_eq!(next_link(link).as_deref(), Some("https://api.github.com/repositories/1/issues?page=2"));
+        assert_eq!(
+            next_link(link).as_deref(),
+            Some("https://api.github.com/repositories/1/issues?page=2")
+        );
         let last_only = r#"<https://api.github.com/repositories/1/issues?page=1>; rel="prev", <https://api.github.com/repositories/1/issues?page=1>; rel="first""#;
         assert_eq!(next_link(last_only), None);
         assert_eq!(next_link(""), None);
