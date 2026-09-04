@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #4 Pull requests and active-work detection (implemented, merging)
-- **Current Branch**: issue-4-prs-now-section
+- **Current Issue**: #5 GitHub Actions: workflow runs and check runs (next)
+- **Current Branch**: main
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -35,6 +35,8 @@
 - [2026-09-04 04:30] @jwanga: Issue #4 gate — accepted defaults: one GraphQL query per refresh for open-PR review/mergeable/checks/closing issues (body-parsed `Closes #n` fallback without a token); NOW = active issue (branch `issue-<n>-*` else current-branch PR's closing issue) + current-branch PR + workspace agents; two-glyph PR tail; PRs expandable to branch + linked issues; 24 h recently merged/closed group.
 - [2026-09-04 05:00] @jwanga: Issue #4 implemented on `issue-4-prs-now-section`: `model::{PrExtra, Checks, AgentInfo, closing_refs}`, `github::{graphql, parse_pr_extras, enrich_prs}`, `herdr::agent_list`, `poll::workspace_agents` (sent as `Msg::Agents` on change every 2 s tick), tree NOW section + PR nodes/tails/details + `▶` active marker. 28 tests.
 - [2026-09-04 05:30] @jwanga: PR #14 reviewed by 3 agents (0 Critical, 14 Important) — all auto-fixed (rule #15): NOW idle logic unified (`idle` = no active issue and no current-branch PR; count shows busy agents); `closing_refs` no longer treats `other/repo#7` as local; `current_pr` requires the head repo to be ours (fork-safe); checks glyph uses the rollup `state` as tie-breaker; REST reviews fallback for the current branch's PR when GraphQL is unavailable (one request, so the 60/h unauthenticated budget survives); `PrExtra::from_graphql` + `Checks::from_rollup` moved to model.rs; `mergeable` dropped; `issue_from_branch` rewritten; shared `is_recent`; agent listing keeps the previous list on transient errors; tests for main + idle agent and out-of-view active issue. 30 tests.
+- [2026-09-04 05:45] @jwanga: Issue #4 done — PR #14 merged; milestone 1 at 4/6.
+- [2026-09-04 05:45] @jwanga: Refreshed architecture diagram (trigger: issue-close #4, diagram type: flowchart)
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
