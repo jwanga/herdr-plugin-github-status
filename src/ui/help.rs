@@ -11,7 +11,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("tab ⇧tab", "next/prev section"),
     ("g/G ⇱/⇲", "top / bottom"),
     ("^d / ^u", "half page"),
-    ("pgdn/pgup", "page"),
+    ("pg↑/pg↓", "page"),
     ("o", "open in browser"),
     ("r", "refresh now"),
     ("?", "this help"),

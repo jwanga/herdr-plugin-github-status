@@ -436,7 +436,8 @@ mod tests {
         assert_eq!(app.current_url(), Some("https://p/11"));
         app.handle_event(key(KeyCode::Char('?')));
         assert!(app.show_help);
-        assert!(texts(&body_lines(&app, 26)).iter().all(|t| t.chars().count() <= 26));
+        let help = texts(&body_lines(&app, 26));
+        assert!(help.iter().all(|t| t.chars().count() <= 26 && !t.contains('…')), "{help:?}");
         app.handle_event(key(KeyCode::Char('x')));
         assert!(!app.show_help);
     }
