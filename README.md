@@ -47,7 +47,7 @@ The pane docks on the right of the current tab at the same width as herdr's left
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑` / `↓` | Move the cursor |
-| `Enter` / `Space` | Expand or collapse the selected section, milestone, or group |
+| `Enter` / `Space` | Expand or collapse the selected section, milestone, group, or pull request |
 | `←` / `→` | Collapse / expand the selected node |
 | `Tab` / `Shift+Tab` | Jump to the next / previous section |
 | `g` / `G`, `Home` / `End` | Top / bottom |
@@ -60,7 +60,9 @@ The pane docks on the right of the current tab at the same width as herdr's left
 
 Mouse: click a row to select it, click it again to expand or collapse, wheel to scroll.
 
-The tree shows open milestones with `closed/total` (and a progress bar when the pane is 32+ columns wide) and their issues (open first, with the assignee's initials when the pane is 30+ columns wide), a collapsed group of closed milestones, open issues with no milestone plus a collapsed group of issues closed in the last 24 hours, and open pull requests.
+The **NOW** section at the top shows what is in progress: the active issue (from a branch named `issue-<n>-…`, or the issue the current branch's pull request closes), the current branch's pull request with its review decision (`A` approved, `C` changes requested, `R` review required) and checks state (`✓` passing, `◔` pending, `✗` failing; `·` when unknown, which is the case for all but the current branch's PR without a token), and the herdr agents in this workspace with their state (`◐` working, `■` blocked, `✓` done, `○` idle). The active issue is marked `▶` in the milestone tree as well.
+
+The tree shows open milestones with `closed/total` (and a progress bar when the pane is 32+ columns wide) and their issues (open first, with the assignee's initials when the pane is 30+ columns wide), a collapsed group of closed milestones, open issues with no milestone plus a collapsed group of issues closed in the last 24 hours, and open pull requests with the same review/checks tail; expanding a pull request shows its branch and the issues it closes, and a collapsed group lists pull requests merged or closed in the last 24 hours.
 
 ### Configuration
 Documented as features land. Config lives in the directory printed by `herdr plugin config-dir jwanga.github-status`.

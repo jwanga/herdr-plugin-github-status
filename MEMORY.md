@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #4 Pull requests and active-work detection (next)
-- **Current Branch**: main
+- **Current Issue**: #4 Pull requests and active-work detection (implemented, merging)
+- **Current Branch**: issue-4-prs-now-section
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -32,6 +32,9 @@
 - [2026-09-04 03:55] @jwanga: PR #13 reviewed by 3 agents (1 Critical: dead test scaffolding; 13 Important) — all auto-fixed (rule #15): tree split into width-independent `flatten` (cached `App::nodes`, injectable `now`) + `render`; `set_cursor`/`clamp` consolidation; header and help moved to `ui/header.rs`, `ui/help.rs`; `open_url` moved to `util` with a reaper thread; `right_count` pads by chars (fixed wide-pane bar misalignment); `←`/`→` collapse/expand, `h`/`l` dropped; assignee initials at ≥30 cols; 24 h window tested at fixed timestamps; URL assertions; README keys corrected.
 - [2026-09-04 04:20] @jwanga: Issue #3 done — merge commit c134445 on main. GitHub errored mid-merge (GraphQL E820:2F3296), leaving PR #13 marked open/"conflicting" even though its head is an ancestor of main; issue #3 closed explicitly as completed. Milestone 1 at 3/6.
 - [2026-09-04 04:20] @jwanga: Refreshed architecture diagram (trigger: issue-close #3, diagram type: flowchart)
+- [2026-09-04 04:30] @jwanga: Issue #4 gate — accepted defaults: one GraphQL query per refresh for open-PR review/mergeable/checks/closing issues (body-parsed `Closes #n` fallback without a token); NOW = active issue (branch `issue-<n>-*` else current-branch PR's closing issue) + current-branch PR + workspace agents; two-glyph PR tail; PRs expandable to branch + linked issues; 24 h recently merged/closed group.
+- [2026-09-04 05:00] @jwanga: Issue #4 implemented on `issue-4-prs-now-section`: `model::{PrExtra, Checks, AgentInfo, closing_refs}`, `github::{graphql, parse_pr_extras, enrich_prs}`, `herdr::agent_list`, `poll::workspace_agents` (sent as `Msg::Agents` on change every 2 s tick), tree NOW section + PR nodes/tails/details + `▶` active marker. 28 tests.
+- [2026-09-04 05:30] @jwanga: PR #14 reviewed by 3 agents (0 Critical, 14 Important) — all auto-fixed (rule #15): NOW idle logic unified (`idle` = no active issue and no current-branch PR; count shows busy agents); `closing_refs` no longer treats `other/repo#7` as local; `current_pr` requires the head repo to be ours (fork-safe); checks glyph uses the rollup `state` as tie-breaker; REST reviews fallback for the current branch's PR when GraphQL is unavailable (one request, so the 60/h unauthenticated budget survives); `PrExtra::from_graphql` + `Checks::from_rollup` moved to model.rs; `mergeable` dropped; `issue_from_branch` rewritten; shared `is_recent`; agent listing keeps the previous list on transient errors; tests for main + idle agent and out-of-view active issue. 30 tests.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
@@ -39,6 +42,7 @@
 - [2026-09-04 00:25] @jwanga: Pane width = herdr sidebar width (session.json `sidebar_width`, config `[ui] sidebar_width`, default 26). Verified: `pane split --ratio R` gives the first pane floor(W*R) columns, so a right pane of N columns uses ratio 1 - N/W.
 - [2026-09-04 00:25] @jwanga: "Real time" = conditional-request polling (ETag) every 10 s (5 s while runs are active) plus snapshot diffing into an activity feed. GitHub has no push channel to a local TUI without webhooks; ETag 304s do not count against the rate limit.
 - [2026-09-04 00:25] @jwanga: Plugin id `jwanga.github-status`, pane id `status`, binary `herdr-github-status`.
+- [2026-09-04 05:30] @jwanga: Descoped from issue #4 deliberately: the REST reviews fallback covers only the current branch's PR, not every open PR — fetching reviews per PR without a token would exhaust GitHub's 60 requests/hour in minutes.
 
 ## Notes
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

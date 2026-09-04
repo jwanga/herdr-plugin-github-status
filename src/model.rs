@@ -71,11 +71,125 @@ impl Issue {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RepoShort {
+    pub full_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GitRef {
     #[serde(rename = "ref")]
     pub name: String,
     #[serde(default)]
     pub sha: String,
+    /// The repository the ref lives in (`None` for a deleted fork).
+    #[serde(default)]
+    pub repo: Option<RepoShort>,
+}
+
+/// Check-run / status rollup for a PR head, summarized from GraphQL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checks {
+    /// SUCCESS | FAILURE | PENDING | ERROR | EXPECTED
+    pub state: String,
+    pub total: usize,
+    pub failed: usize,
+    pub pending: usize,
+}
+
+/// Data only the GraphQL API provides; empty when unauthenticated or on GraphQL errors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrExtra {
+    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED
+    pub review: Option<String>,
+    pub checks: Option<Checks>,
+    /// Issues this PR closes (from GraphQL, else parsed from the body).
+    pub closes: Vec<u64>,
+}
+
+impl PrExtra {
+    /// `(number, extra)` pairs from the GraphQL `pullRequests` query (see `github::PR_EXTRA_QUERY`).
+    pub fn from_graphql(value: &serde_json::Value) -> Vec<(u64, PrExtra)> {
+        let Some(nodes) = value.pointer("/data/repository/pullRequests/nodes").and_then(|n| n.as_array()) else {
+            return Vec::new();
+        };
+        nodes
+            .iter()
+            .filter_map(|n| {
+                let number = n.get("number")?.as_u64()?;
+                let review = n.get("reviewDecision").and_then(|v| v.as_str()).map(str::to_string);
+                let closes = n
+                    .pointer("/closingIssuesReferences/nodes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|i| i.get("number").and_then(|x| x.as_u64())).collect())
+                    .unwrap_or_default();
+                let checks = n
+                    .pointer("/commits/nodes/0/commit/statusCheckRollup")
+                    .filter(|r| !r.is_null())
+                    .map(Checks::from_rollup);
+                Some((number, PrExtra { review, checks, closes }))
+            })
+            .collect()
+    }
+}
+
+impl Checks {
+    /// Summarize a GraphQL `statusCheckRollup`: check runs and status contexts.
+    pub fn from_rollup(rollup: &serde_json::Value) -> Checks {
+        let contexts = rollup.pointer("/contexts/nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut failed = 0;
+        let mut pending = 0;
+        for c in &contexts {
+            let s = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            match s("__typename") {
+                "CheckRun" => match (s("status"), s("conclusion")) {
+                    ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => {}
+                    ("COMPLETED", _) => failed += 1,
+                    _ => pending += 1,
+                },
+                _ => match s("state") {
+                    "SUCCESS" => {}
+                    "PENDING" | "EXPECTED" => pending += 1,
+                    _ => failed += 1,
+                },
+            }
+        }
+        Checks {
+            state: rollup.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            total: rollup.pointer("/contexts/totalCount").and_then(|v| v.as_u64()).unwrap_or(contexts.len() as u64) as usize,
+            failed,
+            pending,
+        }
+    }
+}
+
+/// Review decision derived from REST `/pulls/{n}/reviews`: the latest review per user
+/// decides; any CHANGES_REQUESTED wins over APPROVED.
+pub fn review_decision(reviews: &[Review]) -> Option<String> {
+    let mut latest: Vec<(&str, &str)> = Vec::new();
+    for r in reviews {
+        if !matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+            continue;
+        }
+        let login = r.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+        match latest.iter_mut().find(|(l, _)| *l == login) {
+            Some(slot) => slot.1 = &r.state,
+            None => latest.push((login, &r.state)),
+        }
+    }
+    if latest.iter().any(|(_, s)| *s == "CHANGES_REQUESTED") {
+        Some("CHANGES_REQUESTED".into())
+    } else if latest.iter().any(|(_, s)| *s == "APPROVED") {
+        Some("APPROVED".into())
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Review {
+    pub state: String,
+    #[serde(default)]
+    pub user: Option<User>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +201,8 @@ pub struct PullRequest {
     pub draft: bool,
     #[serde(default)]
     pub merged_at: Option<String>,
+    #[serde(default)]
+    pub closed_at: Option<String>,
     pub head: GitRef,
     pub base: GitRef,
     #[serde(default)]
@@ -95,12 +211,50 @@ pub struct PullRequest {
     pub html_url: String,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(skip)]
+    pub extra: PrExtra,
 }
 
 impl PullRequest {
     pub fn is_open(&self) -> bool {
         self.state == "open"
     }
+    pub fn is_merged(&self) -> bool {
+        self.merged_at.is_some()
+    }
+}
+
+/// Issue numbers referenced by closing keywords (`closes #12`, `Fixes: #3`, `resolved #7`).
+pub fn closing_refs(body: &str) -> Vec<u64> {
+    const KEYWORDS: [&str; 9] = ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"];
+    let mut out = Vec::new();
+    let words: Vec<&str> = body.split_whitespace().collect();
+    for pair in words.windows(2) {
+        let key = pair[0].trim_end_matches(':').to_ascii_lowercase();
+        if !KEYWORDS.contains(&key.as_str()) {
+            continue;
+        }
+        // Only surrounding punctuation is stripped: `other/repo#7` must not become `#7`.
+        let num = pair[1]
+            .trim_start_matches(['(', '[', '*', '_', '`', '"', '\''])
+            .trim_end_matches(|c: char| !c.is_ascii_digit());
+        if let Some(n) = num.strip_prefix('#').and_then(|n| n.parse::<u64>().ok()) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// A herdr agent running in this workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub pane_id: String,
+    pub agent: String,
+    /// idle | working | blocked | done | unknown
+    pub status: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,5 +274,54 @@ impl Snapshot {
     }
     pub fn open_prs(&self) -> usize {
         self.prs.iter().filter(|p| p.is_open()).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_closing_keywords() {
+        assert_eq!(closing_refs("Fixes #12 and closes #7, resolves: #7. Refs #9. close #x"), vec![12, 7]);
+        assert_eq!(closing_refs("Closes #3\n\nCo-Authored-By: x"), vec![3]);
+        assert_eq!(closing_refs("closes (#5) and fixes [#6]"), vec![5, 6]);
+        assert!(closing_refs("nothing here #4").is_empty());
+        assert!(closing_refs("Closes other/repo#7").is_empty(), "cross-repo refs are not local issues");
+    }
+
+    #[test]
+    fn summarizes_graphql_pr_extras() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"data":{"repository":{"pullRequests":{"nodes":[
+          {"number":10,"reviewDecision":"APPROVED",
+           "closingIssuesReferences":{"nodes":[{"number":1},{"number":2}]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":3,"nodes":[
+             {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+             {"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null},
+             {"__typename":"StatusContext","state":"FAILURE"}]}}}}]}},
+          {"number":11,"reviewDecision":null,"closingIssuesReferences":{"nodes":[]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
+        ]}}}}"#).unwrap();
+        let extras = PrExtra::from_graphql(&v);
+        assert_eq!(extras.len(), 2);
+        let (n, e) = &extras[0];
+        assert_eq!(*n, 10);
+        assert_eq!(e.review.as_deref(), Some("APPROVED"));
+        assert_eq!(e.closes, vec![1, 2]);
+        let c = e.checks.as_ref().unwrap();
+        assert_eq!((c.state.as_str(), c.total, c.failed, c.pending), ("FAILURE", 3, 1, 1));
+        assert!(extras[1].1.checks.is_none() && extras[1].1.review.is_none());
+        assert!(PrExtra::from_graphql(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn derives_review_decision_from_rest_reviews() {
+        let r = |state: &str, login: &str| Review { state: state.into(), user: Some(User { login: login.into() }) };
+        assert_eq!(review_decision(&[r("COMMENTED", "a")]), None);
+        assert_eq!(review_decision(&[r("APPROVED", "a")]).as_deref(), Some("APPROVED"));
+        assert_eq!(review_decision(&[r("APPROVED", "a"), r("CHANGES_REQUESTED", "b")]).as_deref(), Some("CHANGES_REQUESTED"));
+        // The latest review per user wins.
+        assert_eq!(review_decision(&[r("CHANGES_REQUESTED", "b"), r("APPROVED", "b")]).as_deref(), Some("APPROVED"));
+        assert_eq!(review_decision(&[r("APPROVED", "b"), r("DISMISSED", "b")]), None);
     }
 }

@@ -1,14 +1,37 @@
-//! Minimal GitHub REST client: token discovery, paginated GETs, rate-limit tracking.
+//! GitHub REST + GraphQL client: token discovery, paginated GETs, rate-limit tracking, and
+//! the per-refresh PR enrichment query.
 
-use crate::model::{Issue, Milestone, PullRequest, Snapshot};
+use crate::model::{closing_refs, review_decision, Issue, Milestone, PrExtra, PullRequest, Review, Snapshot};
 use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
 
 const API: &str = "https://api.github.com";
+const GRAPHQL: &str = "https://api.github.com/graphql";
+
+/// Review decision, mergeability, checks rollup, and closing issues for open PRs.
+const PR_EXTRA_QUERY: &str = r#"query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    pullRequests(first:50,states:[OPEN],orderBy:{field:UPDATED_AT,direction:DESC}){
+      nodes{
+        number reviewDecision
+        closingIssuesReferences(first:20){nodes{number}}
+        commits(last:1){nodes{commit{statusCheckRollup{
+          state
+          contexts(first:100){totalCount nodes{
+            __typename
+            ... on CheckRun{status conclusion}
+            ... on StatusContext{state}
+          }}
+        }}}}
+      }
+    }
+  }
+}"#;
 const MAX_ISSUE_PAGES: usize = 3;
 
 pub struct Client {
@@ -171,6 +194,63 @@ impl Client {
         Ok(out)
     }
 
+    /// POST a GraphQL query; requires a token.
+    pub fn graphql(&mut self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value> {
+        let token = self.token.clone().ok_or_else(|| anyhow!("GraphQL needs a token"))?;
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let mut resp = self
+            .agent
+            .post(GRAPHQL)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes())
+            .context("POST graphql")?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().context("reading GraphQL body")?;
+        if status != 200 {
+            bail!("GraphQL returned HTTP {status}");
+        }
+        let value: serde_json::Value = serde_json::from_str(&text).context("decoding GraphQL JSON")?;
+        if let Some(errors) = value.get("errors").and_then(|e| e.as_array()).filter(|e| !e.is_empty()) {
+            let msg = errors[0].get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+            bail!("GraphQL error: {msg}");
+        }
+        Ok(value)
+    }
+
+    /// Fill `extra` on open PRs: GraphQL when possible; otherwise body-parsed closing refs
+    /// plus a REST reviews lookup for the current branch's PR only (one extra request, so
+    /// the unauthenticated 60/hour budget survives).
+    fn enrich_prs(&mut self, repo: &RepoRef, prs: &mut [PullRequest]) {
+        for p in prs.iter_mut() {
+            p.extra.closes = p.body.as_deref().map(closing_refs).unwrap_or_default();
+        }
+        if !prs.iter().any(|p| p.is_open()) {
+            return;
+        }
+        let vars = serde_json::json!({ "owner": repo.owner, "name": repo.name });
+        let graphql = if self.authenticated() { self.graphql(PR_EXTRA_QUERY, vars).ok() } else { None };
+        if let Some(value) = graphql {
+            let mut extras: HashMap<u64, PrExtra> = PrExtra::from_graphql(&value).into_iter().collect();
+            for p in prs.iter_mut() {
+                if let Some(mut extra) = extras.remove(&p.number) {
+                    if extra.closes.is_empty() {
+                        extra.closes = std::mem::take(&mut p.extra.closes);
+                    }
+                    p.extra = extra;
+                }
+            }
+            return;
+        }
+        let Some(branch) = repo.branch.as_deref() else { return };
+        if let Some(p) = prs.iter_mut().find(|p| p.is_open() && p.head.name == branch) {
+            let url = format!("{API}/repos/{}/{}/pulls/{}/reviews?per_page=100", repo.owner, repo.name, p.number);
+            if let Ok(page) = self.get::<Vec<Review>>(&url, None) {
+                p.extra.review = review_decision(&page.items.unwrap_or_default());
+            }
+        }
+    }
+
     pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
         let base = format!("{API}/repos/{}/{}", repo.owner, repo.name);
         let milestones: Vec<Milestone> =
@@ -183,8 +263,9 @@ impl Client {
             .into_iter()
             .filter(|i| i.pull_request.is_none())
             .collect();
-        let prs: Vec<PullRequest> =
+        let mut prs: Vec<PullRequest> =
             self.get_all(&format!("{base}/pulls?state=all&per_page=50&sort=updated&direction=desc"), 1)?;
+        self.enrich_prs(repo, &mut prs);
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
