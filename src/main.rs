@@ -13,6 +13,7 @@ mod herdr;
 mod model;
 mod poll;
 mod repo;
+mod ui;
 mod util;
 
 use std::process::ExitCode;

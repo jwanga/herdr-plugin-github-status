@@ -46,10 +46,21 @@ The pane docks on the right of the current tab at the same width as herdr's left
 ### Keys
 | Key | Action |
 | --- | --- |
-| `q` / `Ctrl+Q` / `Ctrl+C` | Close the pane |
+| `j` / `k`, `↑` / `↓` | Move the cursor |
+| `Enter` / `Space` | Expand or collapse the selected section, milestone, or group |
+| `←` / `→` | Collapse / expand the selected node |
+| `Tab` / `Shift+Tab` | Jump to the next / previous section |
+| `g` / `G`, `Home` / `End` | Top / bottom |
+| `Ctrl+D` / `Ctrl+U` | Half page down / up |
+| `PageDown` / `PageUp` | Page down / up |
+| `o` | Open the selected item on github.com |
 | `r` | Refresh now |
+| `?` | Key help |
+| `q` / `Ctrl+Q` / `Ctrl+C` | Close the pane |
 
-More keys land with each feature; press `?` inside the pane for the live list.
+Mouse: click a row to select it, click it again to expand or collapse, wheel to scroll.
+
+The tree shows open milestones with `closed/total` (and a progress bar when the pane is 32+ columns wide) and their issues (open first, with the assignee's initials when the pane is 30+ columns wide), a collapsed group of closed milestones, open issues with no milestone plus a collapsed group of issues closed in the last 24 hours, and open pull requests.
 
 ### Configuration
 Documented as features land. Config lives in the directory printed by `herdr plugin config-dir jwanga.github-status`.
