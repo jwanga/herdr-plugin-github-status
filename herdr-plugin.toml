@@ -1,0 +1,47 @@
+# herdr plugin manifest — see https://herdr.dev/docs/plugins/
+#
+# Install:  herdr plugin install jwanga/herdr-plugin-github-status
+# Develop:  cargo build --release && herdr plugin link .
+#
+# The pane command runs the launcher by absolute path under $HERDR_PLUGIN_ROOT: pane
+# commands resolve against the pane's cwd (the project), not the plugin root.
+# herdr/launch.sh prefers bin/ and falls back to target/release/, which the interim
+# [[build]] step below produces on `plugin install`. Prebuilt release binaries (into
+# bin/) arrive with the publishing milestone.
+
+id = "jwanga.github-status"
+name = "GitHub Status"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+platforms = ["macos", "linux"]
+description = "Real-time project status pane: GitHub milestones, issues, pull requests, and Actions, docked on the right at sidebar width."
+
+[[build]]
+command = ["sh", "-c", "export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; cargo build --release"]
+
+[[panes]]
+id = "status"
+title = "status"
+placement = "split"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/herdr/launch.sh\""]
+
+[[actions]]
+id = "toggle"
+title = "GitHub Status: toggle pane"
+description = "Open the status pane on the right of this tab, or close it if it is already open."
+contexts = ["workspace", "pane"]
+command = ["bash", "herdr/pane.sh", "toggle"]
+
+[[actions]]
+id = "open"
+title = "GitHub Status: open pane"
+description = "Open the status pane on the right of this tab (focus it if already open)."
+contexts = ["workspace", "pane"]
+command = ["bash", "herdr/pane.sh", "open"]
+
+[[actions]]
+id = "close"
+title = "GitHub Status: close pane"
+description = "Close every status pane in this workspace."
+contexts = ["workspace", "pane"]
+command = ["bash", "herdr/pane.sh", "close"]
