@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Plugin build output (prebuilt binary lands here on install)
+/bin/
+
+# Node (if any tooling is added)
+node_modules/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local secrets and env
+.env
+*.local.toml
