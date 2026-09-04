@@ -508,6 +508,10 @@ impl Client {
         previous_runs: Option<&[WorkflowRun]>,
     ) -> Result<Snapshot> {
         self.cache.begin();
+        let fetch_started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let base = format!("{API}/repos/{}/{}", repo.owner, repo.name);
         let milestones: Vec<Milestone> =
             self.get_all(&format!("{base}/milestones?state=all&per_page=100"), 2)?;
@@ -538,6 +542,7 @@ impl Client {
             prs,
             runs,
             checks,
+            fetch_started_at,
             fetched_at: SystemTime::now(),
             rate_remaining: self.rate_remaining,
             authenticated: self.authenticated(),
@@ -570,6 +575,7 @@ mod tests {
                 repo: None,
             },
             user: None,
+            created_at: None,
             updated_at: String::new(),
             html_url: String::new(),
             body: None,

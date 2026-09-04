@@ -123,8 +123,14 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
             let cwd = live_cwd(&fallback_cwd);
             let detected = repo::detect(&cwd);
             if detected != current {
+                let same_repo = detected
+                    .as_ref()
+                    .zip(current.as_ref())
+                    .is_some_and(|(d, c)| d.full_name() == c.full_name());
                 current = detected.clone();
-                latest = None;
+                if !same_repo {
+                    latest = None;
+                }
                 want_fetch = true;
                 if current.is_none() && msg_tx.send(Msg::NoRepo(cwd.clone())).is_err() {
                     break;
@@ -223,6 +229,7 @@ mod tests {
             prs: vec![],
             runs: vec![run("completed")],
             checks: Default::default(),
+            fetch_started_at: 0,
             fetched_at: SystemTime::now(),
             rate_remaining: None,
             authenticated: true,

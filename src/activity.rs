@@ -1,6 +1,7 @@
 //! Change detection between two snapshots: the transitions the activity feed shows.
 
 use crate::model::Snapshot;
+use crate::util::parse_rfc3339;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -80,6 +81,14 @@ pub fn diff(prev: &Snapshot, next: &Snapshot, now: u64) -> Vec<Event> {
         .max()
         .unwrap_or(0);
     let max_run = prev.runs.iter().map(|r| r.id).max().unwrap_or(0);
+    // New if numbered above everything seen, or created after the previous fetch began
+    // (covers an issue created between the previous fetch's issue and PR pages).
+    let is_new = |number: u64, created_at: Option<&str>| {
+        number > max_seen
+            || created_at
+                .and_then(parse_rfc3339)
+                .is_some_and(|t| t >= prev.fetch_started_at)
+    };
 
     for i in &next.issues {
         let mut push = |kind: Kind| {
@@ -92,7 +101,9 @@ pub fn diff(prev: &Snapshot, next: &Snapshot, now: u64) -> Vec<Event> {
             })
         };
         match prev.issues.iter().find(|p| p.number == i.number) {
-            None if i.is_open() && i.number > max_seen => push(Kind::IssueOpened),
+            None if i.is_open() && is_new(i.number, i.created_at.as_deref()) => {
+                push(Kind::IssueOpened)
+            }
             None => {}
             Some(p) if p.is_open() && !i.is_open() => push(Kind::IssueClosed),
             Some(p) if !p.is_open() && i.is_open() => push(Kind::IssueReopened),
@@ -126,7 +137,9 @@ pub fn diff(prev: &Snapshot, next: &Snapshot, now: u64) -> Vec<Event> {
             })
         };
         match prev.prs.iter().find(|q| q.number == p.number) {
-            None if p.is_open() && p.number > max_seen => push(Kind::PrOpened),
+            None if p.is_open() && is_new(p.number, p.created_at.as_deref()) => {
+                push(Kind::PrOpened)
+            }
             None => {}
             Some(q) => {
                 if q.is_open() && p.is_merged() {
@@ -186,6 +199,7 @@ mod tests {
             milestone: None,
             labels: vec![],
             assignees: vec![],
+            created_at: None,
             updated_at: String::new(),
             closed_at: None,
             html_url: format!("i{n}"),
@@ -223,6 +237,7 @@ mod tests {
                 repo: None,
             },
             user: None,
+            created_at: None,
             updated_at: String::new(),
             html_url: format!("p{n}"),
             body: None,
@@ -267,6 +282,7 @@ mod tests {
             prs,
             runs,
             checks: Default::default(),
+            fetch_started_at: 0,
             fetched_at: SystemTime::now(),
             rate_remaining: None,
             authenticated: true,
@@ -364,5 +380,14 @@ mod tests {
             ],
         );
         assert!(diff(&prev, &next, 1).is_empty());
+        // …unless the item was created after the previous fetch began.
+        let mut prev = prev;
+        prev.fetch_started_at = 1_788_507_932; // 2026-09-04T07:45:32Z
+        let mut next = next;
+        next.issues[1].created_at = Some("2026-09-04T07:46:00Z".into());
+        let events = diff(&prev, &next, 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, Kind::IssueOpened);
+        assert_eq!(events[0].target, Target::Issue(5));
     }
 }

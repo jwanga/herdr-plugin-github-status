@@ -55,6 +55,8 @@ pub struct Issue {
     pub labels: Vec<Label>,
     #[serde(default)]
     pub assignees: Vec<User>,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub updated_at: String,
     #[serde(default)]
     pub closed_at: Option<String>,
@@ -238,6 +240,8 @@ pub struct PullRequest {
     pub base: GitRef,
     #[serde(default)]
     pub user: Option<User>,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub updated_at: String,
     pub html_url: String,
     #[serde(default)]
@@ -381,6 +385,8 @@ pub struct Snapshot {
     pub runs: Vec<WorkflowRun>,
     /// Check runs by head SHA for open PRs.
     pub checks: std::collections::HashMap<String, Vec<CheckRun>>,
+    /// Unix seconds when this snapshot's fetch began (bounds "new since last time").
+    pub fetch_started_at: u64,
     pub fetched_at: SystemTime,
     pub rate_remaining: Option<u32>,
     pub authenticated: bool,
