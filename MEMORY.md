@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #3 Milestone tree view (implemented, merging)
-- **Current Branch**: issue-3-milestone-tree
+- **Current Issue**: #4 Pull requests and active-work detection (next)
+- **Current Branch**: main
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -30,6 +30,8 @@
 - [2026-09-04 03:10] @jwanga: Issue #3 gate — accepted defaults: progress bar only at ≥32 columns; sections + open milestones expanded by default, closed groups collapsed; `open`/`xdg-open` for `o`.
 - [2026-09-04 03:30] @jwanga: Issue #3 implemented on `issue-3-milestone-tree`: `src/ui/{mod,tree}.rs` (row flattening with `TreeState`, section/group/milestone/issue/PR rows, 24 h recently-closed group), `util::parse_rfc3339`, `app.rs` cursor/scroll/section-jump/toggle/help/mouse, footer position. 23 tests. Verified live in herdr: j/k, Enter collapse, `?` help, footer `n/total`.
 - [2026-09-04 03:55] @jwanga: PR #13 reviewed by 3 agents (1 Critical: dead test scaffolding; 13 Important) — all auto-fixed (rule #15): tree split into width-independent `flatten` (cached `App::nodes`, injectable `now`) + `render`; `set_cursor`/`clamp` consolidation; header and help moved to `ui/header.rs`, `ui/help.rs`; `open_url` moved to `util` with a reaper thread; `right_count` pads by chars (fixed wide-pane bar misalignment); `←`/`→` collapse/expand, `h`/`l` dropped; assignee initials at ≥30 cols; 24 h window tested at fixed timestamps; URL assertions; README keys corrected.
+- [2026-09-04 04:20] @jwanga: Issue #3 done — merge commit c134445 on main. GitHub errored mid-merge (GraphQL E820:2F3296), leaving PR #13 marked open/"conflicting" even though its head is an ancestor of main; issue #3 closed explicitly as completed. Milestone 1 at 3/6.
+- [2026-09-04 04:20] @jwanga: Refreshed architecture diagram (trigger: issue-close #3, diagram type: flowchart)
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
