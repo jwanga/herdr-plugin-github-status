@@ -6,7 +6,9 @@
 //! - `herdr-github-status sidebar-width`   print the column width the pane will use
 //! - `herdr-github-status --version`
 
+mod activity;
 mod app;
+mod cache;
 mod dock;
 mod github;
 mod herdr;

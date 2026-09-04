@@ -1,6 +1,7 @@
 //! GitHub REST + GraphQL client: token discovery, paginated GETs, rate-limit tracking, and
 //! the per-refresh PR enrichment query.
 
+use crate::cache::EtagCache;
 use crate::model::{
     closing_refs, review_decision, CheckRun, Checks, Issue, Milestone, PrExtra, PullRequest,
     Review, Snapshot, WorkflowRun,
@@ -58,6 +59,8 @@ pub struct Client {
     agent: Agent,
     token: Option<String>,
     pub rate_remaining: Option<u32>,
+    cache: EtagCache,
+    debug_log: Option<std::path::PathBuf>,
 }
 
 /// `GH_TOKEN` / `GITHUB_TOKEN`, else `gh auth token`.
@@ -154,18 +157,74 @@ pub fn next_link(link: &str) -> Option<String> {
 }
 
 impl Client {
-    pub fn new(token: Option<String>) -> Self {
+    /// `state_dir` (the plugin state directory) hosts the persisted ETag cache and, when
+    /// `HERDR_GITHUB_STATUS_DEBUG` is set, a `debug.log` of request statuses.
+    pub fn new(token: Option<String>, state_dir: Option<&std::path::Path>) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(15)))
             .user_agent(concat!("herdr-github-status/", env!("CARGO_PKG_VERSION")))
             .build();
+        let debug_log = std::env::var("HERDR_GITHUB_STATUS_DEBUG")
+            .ok()
+            .filter(|v| !v.is_empty() && v != "0")
+            .and(state_dir.map(|d| d.join("debug.log")));
         Self {
             agent: Agent::new_with_config(config),
             token,
             rate_remaining: None,
+            cache: EtagCache::open(state_dir),
+            debug_log,
         }
+    }
+
+    fn log(&self, status: u16, url: &str) {
+        let Some(path) = &self.debug_log else { return };
+        use std::io::Write;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{ts} {status} {url}");
+        }
+    }
+
+    /// A conditional GET through the ETag cache: sends `If-None-Match`, reuses the cached
+    /// body on 304 (free of rate limit), stores the body on 200. Returns the items and
+    /// whether the resource changed.
+    pub fn get_cached<T: DeserializeOwned>(
+        &mut self,
+        url: &str,
+    ) -> Result<(Option<T>, bool, Option<String>)> {
+        let etag = self.cache.etag(url).map(str::to_string);
+        let mut page: Page<serde_json::Value> = self.get(url, etag.as_deref())?;
+        let changed = page.items.is_some();
+        let body = match page.items.take() {
+            Some(value) => {
+                let text = value.to_string();
+                if let Some(e) = page.etag.clone() {
+                    self.cache.store(url, e, text.clone());
+                }
+                Some(text)
+            }
+            None => self.cache.body(url).map(str::to_string),
+        };
+        let items = match body {
+            Some(text) => Some(serde_json::from_str::<T>(&text).context("decoding cached JSON")?),
+            None => None,
+        };
+        Ok((items, changed, page.next))
+    }
+
+    /// Persist the ETag cache (no-op unless it changed).
+    pub fn save_cache(&mut self) {
+        self.cache.save();
     }
 
     pub fn authenticated(&self) -> bool {
@@ -218,6 +277,7 @@ impl Client {
         let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<u64>().ok());
         let remaining = header("x-ratelimit-remaining").and_then(|v| v.parse::<u32>().ok());
         let status = resp.status().as_u16();
+        self.log(status, url);
         let body = resp
             .body_mut()
             .read_to_string()
@@ -261,9 +321,9 @@ impl Client {
             if pages >= max_pages {
                 break;
             }
-            let page: Page<Vec<T>> = self.get(&u, None)?;
-            out.extend(page.items.unwrap_or_default());
-            next = page.next;
+            let (items, _changed, page_next) = self.get_cached::<Vec<T>>(&u)?;
+            out.extend(items.unwrap_or_default());
+            next = page_next;
             pages += 1;
         }
         Ok(out)
@@ -364,10 +424,8 @@ impl Client {
             "{API}/repos/{}/{}/actions/runs?per_page={RUNS_LIMIT}",
             repo.owner, repo.name
         );
-        match self.get::<RunsPage>(&url, None) {
-            Ok(page) => Ok(Some(
-                page.items.map(|p| p.workflow_runs).unwrap_or_default(),
-            )),
+        match self.get_cached::<RunsPage>(&url) {
+            Ok((items, _, _)) => Ok(Some(items.map(|p| p.workflow_runs).unwrap_or_default())),
             Err(e) if e.downcast_ref::<RateLimited>().is_some() => Err(e),
             Err(_) => Ok(None),
         }
@@ -387,9 +445,9 @@ impl Client {
                 "{API}/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
                 repo.owner, repo.name
             );
-            match self.get::<CheckRunsPage>(&url, None) {
-                Ok(page) => {
-                    out.insert(sha, page.items.map(|p| p.check_runs).unwrap_or_default());
+            match self.get_cached::<CheckRunsPage>(&url) {
+                Ok((items, _, _)) => {
+                    out.insert(sha, items.map(|p| p.check_runs).unwrap_or_default());
                 }
                 Err(e) if e.downcast_ref::<RateLimited>().is_some() => return Err(e),
                 Err(_) => {}
@@ -435,6 +493,7 @@ impl Client {
         self.enrich_prs(repo, &mut prs);
         let runs = self.fetch_runs(repo)?.unwrap_or_default();
         let checks = self.fetch_checks(repo, &mut prs)?;
+        self.save_cache();
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,

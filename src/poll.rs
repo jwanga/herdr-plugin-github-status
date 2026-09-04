@@ -100,7 +100,10 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
     std::thread::spawn(move || {
-        let mut client = Client::new(github::discover_token());
+        let state_dir = std::env::var("HERDR_PLUGIN_STATE_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let mut client = Client::new(github::discover_token(), state_dir.as_deref());
         let mut current: Option<RepoRef> = None;
         let mut latest: Option<Snapshot> = None;
         let mut last_fetch: Option<Instant> = None;

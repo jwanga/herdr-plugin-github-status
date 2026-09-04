@@ -1,6 +1,7 @@
 //! The status TUI: owns the UI state, consumes poll messages, handles input, and composes
 //! the header / body / footer views from `ui`.
 
+use crate::activity::{self, Target};
 use crate::model::{AgentInfo, Snapshot};
 use crate::poll::{self, Cmd, Msg};
 use crate::ui::tree::{self, Node, NodeId, TreeState};
@@ -17,10 +18,25 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 const FOOTER_ROWS: u16 = 1;
+/// Activity events kept in memory.
+pub const MAX_EVENTS: usize = 50;
+/// How long a changed row stays highlighted.
+pub const RECENT_WINDOW_SECS: u64 = 120;
+
+/// Tree nodes that represent an activity target (the main tree and NOW copies).
+fn target_nodes(t: &Target) -> Vec<NodeId> {
+    match t {
+        Target::Issue(n) => vec![NodeId::Issue(*n), NodeId::NowIssue(*n)],
+        Target::Milestone(n) => vec![NodeId::Milestone(*n)],
+        Target::Pr(n) => vec![NodeId::Pr(*n), NodeId::NowPr(*n)],
+        Target::Run(id) => vec![NodeId::Run(*id), NodeId::NowRun(*id)],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -37,6 +53,10 @@ pub struct App {
     pub tree: TreeState,
     /// herdr agents in this workspace, shown in the Now section.
     pub agents: Vec<AgentInfo>,
+    /// Latest detected transitions, newest first (at most `MAX_EVENTS`).
+    pub events: Vec<activity::Event>,
+    /// Nodes changed recently, with the time of the change, for the highlight.
+    pub recent: HashMap<NodeId, u64>,
     /// Visible tree nodes, rebuilt when the snapshot or expansion state changes.
     pub nodes: Vec<Node>,
     pub cursor: usize,
@@ -55,6 +75,8 @@ impl App {
             should_quit: false,
             tree: TreeState::default(),
             agents: Vec::new(),
+            events: Vec::new(),
+            recent: HashMap::new(),
             nodes: Vec::new(),
             cursor: 0,
             scroll: 0,
@@ -67,7 +89,7 @@ impl App {
     /// Recompute the visible nodes and keep the cursor valid.
     pub fn rebuild(&mut self) {
         self.nodes = match &self.snapshot {
-            Some(s) => tree::flatten(s, &self.tree, tree::now_secs(), &self.agents),
+            Some(s) => tree::flatten(s, &self.tree, tree::now_secs(), &self.agents, &self.events),
             None => Vec::new(),
         };
         self.clamp();
@@ -129,6 +151,13 @@ impl App {
         if let Some(t) = target {
             self.set_cursor(t);
         }
+    }
+
+    /// Whether `id` changed within the highlight window.
+    pub fn is_recent(&self, id: &NodeId, now: u64) -> bool {
+        self.recent
+            .get(id)
+            .is_some_and(|t| now.saturating_sub(*t) <= RECENT_WINDOW_SECS)
     }
 
     pub fn current(&self) -> Option<&Node> {
@@ -245,6 +274,24 @@ impl App {
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Snapshot(s) => {
+                let now = tree::now_secs();
+                if let Some(prev) = self.snapshot.as_ref().filter(|p| p.repo == s.repo) {
+                    let mut fresh = activity::diff(prev, &s, now);
+                    for e in &fresh {
+                        for id in target_nodes(&e.target) {
+                            self.recent.insert(id, now);
+                        }
+                    }
+                    fresh.reverse();
+                    fresh.append(&mut self.events);
+                    self.events = fresh;
+                    self.events.truncate(MAX_EVENTS);
+                } else if self.snapshot.as_ref().is_some_and(|p| p.repo != s.repo) {
+                    self.events.clear();
+                    self.recent.clear();
+                }
+                self.recent
+                    .retain(|_, t| now.saturating_sub(*t) <= RECENT_WINDOW_SECS);
                 self.snapshot = Some(*s);
                 self.status = Status::Ok;
             }
@@ -319,6 +366,7 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     if app.show_help {
         return help::lines(w);
     }
+    let now = tree::now_secs();
     let dim = Style::default().fg(Color::DarkGray);
     if app.snapshot.is_none() {
         let mut lines = vec![Line::from("")];
@@ -350,12 +398,14 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
         .skip(app.scroll)
         .take(app.page())
         .map(|(i, node)| {
-            let line = tree::render(node, w);
-            if i == app.cursor {
-                line.patch_style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                line
+            let mut line = tree::render(node, w);
+            if app.is_recent(&node.id, now) {
+                line = line.patch_style(Style::default().fg(Color::Yellow));
             }
+            if i == app.cursor {
+                line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            line
         })
         .collect()
 }
@@ -495,14 +545,14 @@ mod tests {
         assert!(text[0].starts_with("▾ NOW"));
         assert!(text[2].starts_with("▾ MILESTONES"));
         assert!(text[3].contains("Status pane") && text[3].ends_with("1/6"));
-        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/16"));
+        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/18"));
     }
 
     #[test]
     fn cursor_moves_scrolls_and_wraps_sections() {
         let mut app = app();
         let n = app.nodes.len();
-        assert_eq!(n, 16);
+        assert_eq!(n, 18);
         for _ in 0..8 {
             app.handle_event(key(KeyCode::Char('j')));
         }
@@ -524,11 +574,14 @@ mod tests {
         ));
         app.handle_event(key(KeyCode::BackTab));
         assert!(
-            matches!(app.current().unwrap().id, NodeId::Section(Section::Actions)),
+            matches!(
+                app.current().unwrap().id,
+                NodeId::Section(Section::Activity)
+            ),
             "wraps around"
         );
         app.handle_event(key(KeyCode::PageUp));
-        assert_eq!(app.cursor, 8);
+        assert_eq!(app.cursor, 10);
     }
 
     #[test]
@@ -539,24 +592,25 @@ mod tests {
         }
         assert_eq!(app.current_url(), Some("https://m/1"));
         app.handle_event(key(KeyCode::Enter));
-        assert_eq!(app.nodes.len(), 10);
+        assert_eq!(app.nodes.len(), 12);
         assert!(!app.nodes.iter().any(|n| matches!(n.id, NodeId::Issue(2))));
         app.handle_event(key(KeyCode::Left));
         assert_eq!(
             app.nodes.len(),
-            10,
+            12,
             "left on a collapsed node stays collapsed"
         );
         app.handle_event(key(KeyCode::Right));
-        assert_eq!(app.nodes.len(), 16, "right expands");
+        assert_eq!(app.nodes.len(), 18, "right expands");
         app.handle_event(key(KeyCode::Char('G')));
         assert_eq!(
             app.current_url(),
             None,
             "the no-runs placeholder has no link"
         );
-        app.handle_event(key(KeyCode::Char('k')));
-        app.handle_event(key(KeyCode::Char('k')));
+        for _ in 0..4 {
+            app.handle_event(key(KeyCode::Char('k')));
+        }
         assert_eq!(app.current_url(), Some("https://p/11"));
         app.handle_event(key(KeyCode::Char('?')));
         assert!(app.show_help);
@@ -578,7 +632,7 @@ mod tests {
         app.handle_event(click(5));
         assert_eq!(
             app.nodes.len(),
-            10,
+            12,
             "second click on the selected milestone collapses it"
         );
         app.handle_event(click(40));
@@ -629,6 +683,36 @@ mod tests {
             app.snapshot.is_some(),
             "same-repo errors keep the last snapshot"
         );
+    }
+
+    #[test]
+    fn snapshot_diff_feeds_activity_and_highlights() {
+        let mut app = app();
+        assert!(app.events.is_empty());
+        let mut next = snapshot();
+        next.issues[0].state = "closed".into(); // #2
+        next.prs[0].draft = false; // #11 ready
+        app.handle_msg(Msg::Snapshot(Box::new(next)));
+        let kinds: Vec<&activity::Kind> = app.events.iter().map(|e| &e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![&activity::Kind::PrReady, &activity::Kind::IssueClosed],
+            "newest first"
+        );
+        let now = tree::now_secs();
+        assert!(app.is_recent(&NodeId::Issue(2), now));
+        assert!(app.is_recent(&NodeId::Pr(11), now));
+        assert!(!app.is_recent(&NodeId::Issue(3), now));
+        assert!(app
+            .nodes
+            .iter()
+            .any(|n| matches!(n.id, NodeId::Section(Section::Activity))));
+        assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Event(_))));
+        // A different repository resets the feed.
+        let mut other = snapshot();
+        other.repo.name = "elsewhere".into();
+        app.handle_msg(Msg::Snapshot(Box::new(other)));
+        assert!(app.events.is_empty());
     }
 
     #[test]
