@@ -13,7 +13,7 @@ cargo build --release
 herdr plugin link . && herdr plugin action invoke toggle --plugin jwanga.github-status
 
 ## Test
-cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --locked
 
 CI (`.github/workflows/ci.yml`) enforces exactly these three commands on every push and pull request.
 
