@@ -1,5 +1,7 @@
 //! Rendering helpers shared by the pane's views.
 
+pub mod header;
+pub mod help;
 pub mod tree;
 
 use ratatui::style::{Color, Style};
@@ -8,7 +10,7 @@ use std::time::SystemTime;
 
 /// A row with `left` spans (occupying `left_width` columns) and a dim, right-aligned count.
 pub fn right_count(mut left: Vec<Span<'static>>, left_width: usize, count: String, w: usize) -> Line<'static> {
-    let pad = w.saturating_sub(left_width + count.len());
+    let pad = w.saturating_sub(left_width + count.chars().count());
     left.push(Span::raw(" ".repeat(pad.max(1))));
     left.push(Span::styled(count, Style::default().fg(Color::DarkGray)));
     Line::from(left)
@@ -75,20 +77,6 @@ pub fn fit(s: &str, width: usize) -> String {
     } else {
         t
     }
-}
-
-/// Open a URL in the user's browser without blocking.
-pub fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(not(target_os = "macos"))]
-    let program = "xdg-open";
-    let _ = std::process::Command::new(program)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 #[cfg(test)]

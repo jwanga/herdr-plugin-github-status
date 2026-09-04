@@ -29,6 +29,7 @@
 - [2026-09-04 02:55] @jwanga: Refreshed architecture diagram (trigger: issue-close #2, diagram type: flowchart)
 - [2026-09-04 03:10] @jwanga: Issue #3 gate — accepted defaults: progress bar only at ≥32 columns; sections + open milestones expanded by default, closed groups collapsed; `open`/`xdg-open` for `o`.
 - [2026-09-04 03:30] @jwanga: Issue #3 implemented on `issue-3-milestone-tree`: `src/ui/{mod,tree}.rs` (row flattening with `TreeState`, section/group/milestone/issue/PR rows, 24 h recently-closed group), `util::parse_rfc3339`, `app.rs` cursor/scroll/section-jump/toggle/help/mouse, footer position. 23 tests. Verified live in herdr: j/k, Enter collapse, `?` help, footer `n/total`.
+- [2026-09-04 03:55] @jwanga: PR #13 reviewed by 3 agents (1 Critical: dead test scaffolding; 13 Important) — all auto-fixed (rule #15): tree split into width-independent `flatten` (cached `App::nodes`, injectable `now`) + `render`; `set_cursor`/`clamp` consolidation; header and help moved to `ui/header.rs`, `ui/help.rs`; `open_url` moved to `util` with a reaper thread; `right_count` pads by chars (fixed wide-pane bar misalignment); `←`/`→` collapse/expand, `h`/`l` dropped; assignee initials at ≥30 cols; 24 h window tested at fixed timestamps; URL assertions; README keys corrected.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

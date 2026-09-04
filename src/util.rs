@@ -19,6 +19,26 @@ pub fn stdout(program: &str, args: &[&str], cwd: Option<&Path>) -> Option<String
     (!s.is_empty()).then_some(s)
 }
 
+/// Open a URL in the user's browser without blocking; the child is reaped on a helper
+/// thread so no zombie is left behind.
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+    let spawned = Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
 /// Parse an RFC 3339 UTC timestamp like `2026-09-04T07:45:32Z` into Unix seconds.
 /// Fractional seconds are ignored; offsets other than `Z` are applied.
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
