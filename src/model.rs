@@ -78,6 +78,28 @@ pub struct GitRef {
     pub sha: String,
 }
 
+/// Check-run / status rollup for a PR head, summarized from GraphQL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checks {
+    /// SUCCESS | FAILURE | PENDING | ERROR | EXPECTED
+    pub state: String,
+    pub total: usize,
+    pub failed: usize,
+    pub pending: usize,
+}
+
+/// Data only the GraphQL API provides; empty when unauthenticated or on GraphQL errors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrExtra {
+    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED
+    pub review: Option<String>,
+    /// MERGEABLE | CONFLICTING | UNKNOWN
+    pub mergeable: Option<String>,
+    pub checks: Option<Checks>,
+    /// Issues this PR closes (from GraphQL, else parsed from the body).
+    pub closes: Vec<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PullRequest {
     pub number: u64,
@@ -87,6 +109,8 @@ pub struct PullRequest {
     pub draft: bool,
     #[serde(default)]
     pub merged_at: Option<String>,
+    #[serde(default)]
+    pub closed_at: Option<String>,
     pub head: GitRef,
     pub base: GitRef,
     #[serde(default)]
@@ -95,12 +119,47 @@ pub struct PullRequest {
     pub html_url: String,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(skip)]
+    pub extra: PrExtra,
 }
 
 impl PullRequest {
     pub fn is_open(&self) -> bool {
         self.state == "open"
     }
+    pub fn is_merged(&self) -> bool {
+        self.merged_at.is_some()
+    }
+}
+
+/// Issue numbers referenced by closing keywords (`closes #12`, `Fixes: #3`, `resolved #7`).
+pub fn closing_refs(body: &str) -> Vec<u64> {
+    const KEYWORDS: [&str; 9] = ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"];
+    let mut out = Vec::new();
+    let words: Vec<&str> = body.split_whitespace().collect();
+    for pair in words.windows(2) {
+        let key = pair[0].trim_end_matches(':').to_ascii_lowercase();
+        if !KEYWORDS.contains(&key.as_str()) {
+            continue;
+        }
+        let num = pair[1].trim_matches(|c: char| !c.is_ascii_digit() && c != '#');
+        if let Some(n) = num.strip_prefix('#').and_then(|n| n.parse::<u64>().ok()) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// A herdr agent running in this workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub pane_id: String,
+    pub agent: String,
+    /// idle | working | blocked | done | unknown
+    pub status: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,5 +179,17 @@ impl Snapshot {
     }
     pub fn open_prs(&self) -> usize {
         self.prs.iter().filter(|p| p.is_open()).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::closing_refs;
+
+    #[test]
+    fn parses_closing_keywords() {
+        assert_eq!(closing_refs("Fixes #12 and closes #7, resolves: #7. Refs #9. close #x"), vec![12, 7]);
+        assert_eq!(closing_refs("Closes #3\n\nCo-Authored-By: x"), vec![3]);
+        assert!(closing_refs("nothing here #4").is_empty());
     }
 }

@@ -1,7 +1,7 @@
 //! The status TUI: owns the UI state, consumes poll messages, handles input, and composes
 //! the header / body / footer views from `ui`.
 
-use crate::model::Snapshot;
+use crate::model::{AgentInfo, Snapshot};
 use crate::poll::{self, Cmd, Msg};
 use crate::ui::tree::{self, Node, NodeId, TreeState};
 use crate::ui::{header, help, wrap};
@@ -35,6 +35,8 @@ pub struct App {
     pub status: Status,
     pub should_quit: bool,
     pub tree: TreeState,
+    /// herdr agents in this workspace, shown in the Now section.
+    pub agents: Vec<AgentInfo>,
     /// Visible tree nodes, rebuilt when the snapshot or expansion state changes.
     pub nodes: Vec<Node>,
     pub cursor: usize,
@@ -52,6 +54,7 @@ impl App {
             status: Status::Loading,
             should_quit: false,
             tree: TreeState::default(),
+            agents: Vec::new(),
             nodes: Vec::new(),
             cursor: 0,
             scroll: 0,
@@ -64,7 +67,7 @@ impl App {
     /// Recompute the visible nodes and keep the cursor valid.
     pub fn rebuild(&mut self) {
         self.nodes = match &self.snapshot {
-            Some(s) => tree::flatten(s, &self.tree, tree::now_secs()),
+            Some(s) => tree::flatten(s, &self.tree, tree::now_secs(), &self.agents),
             None => Vec::new(),
         };
         self.clamp();
@@ -243,6 +246,7 @@ impl App {
                 }
                 self.status = Status::Error(message);
             }
+            Msg::Agents(agents) => self.agents = agents,
         }
         self.rebuild();
     }
@@ -358,8 +362,8 @@ mod tests {
             }],
             issues: (2..=7).map(|n| issue(n, Some(1))).chain([issue(8, None)]).collect(),
             prs: vec![PullRequest { number: 11, title: "Scaffold the plugin".into(), state: "open".into(), draft: true,
-                merged_at: None, head: GitRef { name: "b".into(), sha: String::new() }, base: GitRef { name: "main".into(), sha: String::new() },
-                user: None, updated_at: String::new(), html_url: "https://p/11".into(), body: None }],
+                merged_at: None, closed_at: None, head: GitRef { name: "b".into(), sha: String::new() }, base: GitRef { name: "main".into(), sha: String::new() },
+                user: None, updated_at: String::new(), html_url: "https://p/11".into(), body: None, extra: Default::default() }],
             fetched_at: SystemTime::now(),
             rate_remaining: Some(4999),
             authenticated: true,
@@ -391,16 +395,17 @@ mod tests {
         let text = texts(&body_lines(&app, 26));
         assert_eq!(text.len(), 6, "one page of rows");
         assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
-        assert!(text[0].starts_with("▾ MILESTONES"));
-        assert!(text[1].contains("Status pane") && text[1].ends_with("1/6"));
-        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/12"));
+        assert!(text[0].starts_with("▾ NOW"));
+        assert!(text[2].starts_with("▾ MILESTONES"));
+        assert!(text[3].contains("Status pane") && text[3].ends_with("1/6"));
+        assert!(texts(&[footer_line(&app, 26)])[0].ends_with("1/14"));
     }
 
     #[test]
     fn cursor_moves_scrolls_and_wraps_sections() {
         let mut app = app();
         let n = app.nodes.len();
-        assert_eq!(n, 12);
+        assert_eq!(n, 14);
         for _ in 0..8 {
             app.handle_event(key(KeyCode::Char('j')));
         }
@@ -411,27 +416,29 @@ mod tests {
         app.handle_event(key(KeyCode::Char('g')));
         assert_eq!(app.cursor, 0);
         app.handle_event(key(KeyCode::Tab));
-        assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::Issues)));
-        app.handle_event(key(KeyCode::BackTab));
         assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::Milestones)));
+        app.handle_event(key(KeyCode::BackTab));
+        assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::Now)));
         app.handle_event(key(KeyCode::BackTab));
         assert!(matches!(app.current().unwrap().id, NodeId::Section(Section::PullRequests)), "wraps around");
         app.handle_event(key(KeyCode::PageUp));
-        assert_eq!(app.cursor, 4);
+        assert_eq!(app.cursor, 6);
     }
 
     #[test]
     fn toggle_keys_and_help() {
         let mut app = app();
-        app.handle_event(key(KeyCode::Char('j'))); // milestone row
+        for _ in 0..3 {
+            app.handle_event(key(KeyCode::Char('j'))); // milestone row
+        }
         assert_eq!(app.current_url(), Some("https://m/1"));
         app.handle_event(key(KeyCode::Enter));
-        assert_eq!(app.nodes.len(), 6);
+        assert_eq!(app.nodes.len(), 8);
         assert!(!app.nodes.iter().any(|n| matches!(n.id, NodeId::Issue(2))));
         app.handle_event(key(KeyCode::Left));
-        assert_eq!(app.nodes.len(), 6, "left on a collapsed node stays collapsed");
+        assert_eq!(app.nodes.len(), 8, "left on a collapsed node stays collapsed");
         app.handle_event(key(KeyCode::Right));
-        assert_eq!(app.nodes.len(), 12, "right expands");
+        assert_eq!(app.nodes.len(), 14, "right expands");
         app.handle_event(key(KeyCode::Char('G')));
         assert_eq!(app.current_url(), Some("https://p/11"));
         app.handle_event(key(KeyCode::Char('?')));
@@ -445,12 +452,12 @@ mod tests {
     #[test]
     fn click_selects_then_toggles() {
         let mut app = app();
-        app.handle_event(click(3)); // body starts at y=2 → row index 1 (milestone)
-        assert_eq!(app.cursor, 1);
-        app.handle_event(click(3));
-        assert_eq!(app.nodes.len(), 6, "second click on the selected milestone collapses it");
+        app.handle_event(click(5)); // body starts at y=2 → row index 3 (milestone)
+        assert_eq!(app.cursor, 3);
+        app.handle_event(click(5));
+        assert_eq!(app.nodes.len(), 8, "second click on the selected milestone collapses it");
         app.handle_event(click(40));
-        assert_eq!(app.cursor, 1, "clicks outside the body are ignored");
+        assert_eq!(app.cursor, 3, "clicks outside the body are ignored");
     }
 
     #[test]
@@ -488,5 +495,14 @@ mod tests {
         app.handle_msg(Msg::Snapshot(Box::new(snapshot())));
         app.handle_msg(Msg::Error { repo: snapshot().repo, message: "flaky".into() });
         assert!(app.snapshot.is_some(), "same-repo errors keep the last snapshot");
+    }
+
+    #[test]
+    fn agents_update_rebuilds_now_section() {
+        let mut app = app();
+        assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)));
+        app.handle_msg(Msg::Agents(vec![AgentInfo { pane_id: "w7:p1".into(), agent: "claude".into(), status: "working".into(), title: None }]));
+        assert!(app.nodes.iter().any(|n| matches!(n.id, NodeId::Agent(_))));
+        assert!(!app.nodes.iter().any(|n| matches!(n.id, NodeId::Idle)));
     }
 }

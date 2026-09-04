@@ -4,7 +4,7 @@
 
 use crate::github::{self, Client, RateLimited};
 use crate::herdr;
-use crate::model::Snapshot;
+use crate::model::{AgentInfo, Snapshot};
 use crate::repo::{self, RepoRef};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -24,6 +24,19 @@ pub enum Msg {
     NoRepo(String),
     /// A fetch for `repo` failed; a previous snapshot of the same repo may stay on screen.
     Error { repo: RepoRef, message: String },
+    /// The herdr agents in this workspace changed.
+    Agents(Vec<AgentInfo>),
+}
+
+/// herdr agents in the pane's workspace (empty outside herdr).
+pub fn workspace_agents() -> Vec<AgentInfo> {
+    let Ok(ws) = std::env::var("HERDR_WORKSPACE_ID") else { return Vec::new() };
+    herdr::agent_list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.workspace_id == ws)
+        .map(|a| AgentInfo { pane_id: a.pane_id, agent: a.agent, status: a.agent_status, title: a.terminal_title_stripped })
+        .collect()
 }
 
 /// The directory the pane should describe: the live cwd of the workspace's focused pane
@@ -63,7 +76,15 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
         let mut last_fetch: Option<Instant> = None;
         let mut blocked_until: Option<SystemTime> = None;
         let mut want_fetch = true;
+        let mut agents: Option<Vec<AgentInfo>> = None;
         loop {
+            let now_agents = workspace_agents();
+            if agents.as_ref() != Some(&now_agents) {
+                agents = Some(now_agents.clone());
+                if msg_tx.send(Msg::Agents(now_agents)).is_err() {
+                    break;
+                }
+            }
             let cwd = live_cwd(&fallback_cwd);
             let detected = repo::detect(&cwd);
             if detected != current {

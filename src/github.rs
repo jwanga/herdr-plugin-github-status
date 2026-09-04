@@ -1,6 +1,6 @@
 //! Minimal GitHub REST client: token discovery, paginated GETs, rate-limit tracking.
 
-use crate::model::{Issue, Milestone, PullRequest, Snapshot};
+use crate::model::{closing_refs, Checks, Issue, Milestone, PrExtra, PullRequest, Snapshot};
 use crate::repo::RepoRef;
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
@@ -9,6 +9,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
 
 const API: &str = "https://api.github.com";
+const GRAPHQL: &str = "https://api.github.com/graphql";
+
+/// Review decision, mergeability, checks rollup, and closing issues for open PRs.
+const PR_EXTRA_QUERY: &str = r#"query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    pullRequests(first:50,states:[OPEN],orderBy:{field:UPDATED_AT,direction:DESC}){
+      nodes{
+        number reviewDecision mergeable
+        closingIssuesReferences(first:20){nodes{number}}
+        commits(last:1){nodes{commit{statusCheckRollup{
+          state
+          contexts(first:100){totalCount nodes{
+            __typename
+            ... on CheckRun{status conclusion}
+            ... on StatusContext{state}
+          }}
+        }}}}
+      }
+    }
+  }
+}"#;
 const MAX_ISSUE_PAGES: usize = 3;
 
 pub struct Client {
@@ -65,6 +86,52 @@ pub fn rate_limit_until(status: u16, retry_after: Option<u64>, reset_epoch: Opti
         return Some(reset.unwrap_or_else(|| SystemTime::now() + Duration::from_secs(60)));
     }
     None
+}
+
+/// `(number, extra)` pairs from the PR_EXTRA_QUERY response.
+pub fn parse_pr_extras(value: &serde_json::Value) -> Vec<(u64, PrExtra)> {
+    let Some(nodes) = value.pointer("/data/repository/pullRequests/nodes").and_then(|n| n.as_array()) else {
+        return Vec::new();
+    };
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let number = n.get("number")?.as_u64()?;
+            let text = |k: &str| n.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let closes = n
+                .pointer("/closingIssuesReferences/nodes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|i| i.get("number").and_then(|x| x.as_u64())).collect())
+                .unwrap_or_default();
+            let checks = n.pointer("/commits/nodes/0/commit/statusCheckRollup").filter(|r| !r.is_null()).map(|rollup| {
+                let contexts = rollup.pointer("/contexts/nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let mut failed = 0;
+                let mut pending = 0;
+                for c in &contexts {
+                    let s = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                    match s("__typename") {
+                        "CheckRun" => match (s("status"), s("conclusion")) {
+                            ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => {}
+                            ("COMPLETED", _) => failed += 1,
+                            _ => pending += 1,
+                        },
+                        _ => match s("state") {
+                            "SUCCESS" => {}
+                            "PENDING" | "EXPECTED" => pending += 1,
+                            _ => failed += 1,
+                        },
+                    }
+                }
+                Checks {
+                    state: rollup.get("state").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    total: rollup.pointer("/contexts/totalCount").and_then(|v| v.as_u64()).unwrap_or(contexts.len() as u64) as usize,
+                    failed,
+                    pending,
+                }
+            });
+            Some((number, PrExtra { review: text("reviewDecision"), mergeable: text("mergeable"), checks, closes }))
+        })
+        .collect()
 }
 
 /// The `rel="next"` URL from a `Link` header.
@@ -171,6 +238,49 @@ impl Client {
         Ok(out)
     }
 
+    /// POST a GraphQL query; requires a token.
+    pub fn graphql(&mut self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value> {
+        let token = self.token.clone().ok_or_else(|| anyhow!("GraphQL needs a token"))?;
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let mut resp = self
+            .agent
+            .post(GRAPHQL)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .send(body.to_string().as_bytes())
+            .context("POST graphql")?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().context("reading GraphQL body")?;
+        if status != 200 {
+            bail!("GraphQL returned HTTP {status}");
+        }
+        let value: serde_json::Value = serde_json::from_str(&text).context("decoding GraphQL JSON")?;
+        if let Some(errors) = value.get("errors").and_then(|e| e.as_array()).filter(|e| !e.is_empty()) {
+            let msg = errors[0].get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+            bail!("GraphQL error: {msg}");
+        }
+        Ok(value)
+    }
+
+    /// Fill `extra` on open PRs from GraphQL when possible; body-parsed closing refs otherwise.
+    fn enrich_prs(&mut self, repo: &RepoRef, prs: &mut [PullRequest]) {
+        for p in prs.iter_mut() {
+            p.extra.closes = p.body.as_deref().map(closing_refs).unwrap_or_default();
+        }
+        if !self.authenticated() || !prs.iter().any(|p| p.is_open()) {
+            return;
+        }
+        let vars = serde_json::json!({ "owner": repo.owner, "name": repo.name });
+        let Ok(value) = self.graphql(PR_EXTRA_QUERY, vars) else { return };
+        let extras = parse_pr_extras(&value);
+        for p in prs.iter_mut() {
+            if let Some(extra) = extras.iter().find(|(n, _)| *n == p.number).map(|(_, e)| e.clone()) {
+                let closes = if extra.closes.is_empty() { std::mem::take(&mut p.extra.closes) } else { extra.closes.clone() };
+                p.extra = PrExtra { closes, ..extra };
+            }
+        }
+    }
+
     pub fn fetch_snapshot(&mut self, repo: &RepoRef) -> Result<Snapshot> {
         let base = format!("{API}/repos/{}/{}", repo.owner, repo.name);
         let milestones: Vec<Milestone> =
@@ -183,8 +293,9 @@ impl Client {
             .into_iter()
             .filter(|i| i.pull_request.is_none())
             .collect();
-        let prs: Vec<PullRequest> =
+        let mut prs: Vec<PullRequest> =
             self.get_all(&format!("{base}/pulls?state=all&per_page=50&sort=updated&direction=desc"), 1)?;
+        self.enrich_prs(repo, &mut prs);
         Ok(Snapshot {
             repo: repo.clone(),
             milestones,
@@ -199,7 +310,31 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_link, rate_limit_until};
+    use super::{next_link, parse_pr_extras, rate_limit_until};
+
+    #[test]
+    fn summarizes_graphql_pr_extras() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"data":{"repository":{"pullRequests":{"nodes":[
+          {"number":10,"reviewDecision":"APPROVED","mergeable":"MERGEABLE",
+           "closingIssuesReferences":{"nodes":[{"number":1},{"number":2}]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":3,"nodes":[
+             {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+             {"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null},
+             {"__typename":"StatusContext","state":"FAILURE"}]}}}}]}},
+          {"number":11,"reviewDecision":null,"mergeable":"UNKNOWN","closingIssuesReferences":{"nodes":[]},
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
+        ]}}}}"#).unwrap();
+        let extras = parse_pr_extras(&v);
+        assert_eq!(extras.len(), 2);
+        let (n, e) = &extras[0];
+        assert_eq!(*n, 10);
+        assert_eq!(e.review.as_deref(), Some("APPROVED"));
+        assert_eq!(e.closes, vec![1, 2]);
+        let c = e.checks.as_ref().unwrap();
+        assert_eq!((c.state.as_str(), c.total, c.failed, c.pending), ("FAILURE", 3, 1, 1));
+        assert!(extras[1].1.checks.is_none() && extras[1].1.review.is_none());
+        assert!(parse_pr_extras(&serde_json::json!({})).is_empty());
+    }
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]

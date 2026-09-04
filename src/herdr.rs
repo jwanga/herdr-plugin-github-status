@@ -95,6 +95,25 @@ pub fn pane_list(workspace: Option<&str>) -> Result<Vec<Pane>> {
     Ok(serde_json::from_value(panes)?)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Agent {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub agent: String,
+    pub agent_status: String,
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
+}
+
+pub fn agent_list() -> Result<Vec<Agent>> {
+    let result = call(&["agent", "list"])?;
+    let agents = result
+        .get("agents")
+        .cloned()
+        .ok_or_else(|| anyhow!("agent list: missing agents"))?;
+    Ok(serde_json::from_value(agents)?)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Rect {
     pub x: u32,
