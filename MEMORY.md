@@ -1,9 +1,9 @@
 # Project Memory
 
 ## Current State
-- **Active Milestone**: Status pane core (#1)
-- **Current Issue**: #6 Real-time polling with ETags, change detection, and an activity feed (implemented, merging)
-- **Current Branch**: issue-6-realtime-activity
+- **Active Milestone**: Auto-dock, configuration, and publishing (#2) — not started
+- **Current Issue**: None (next: #7 Auto-dock hooks)
+- **Current Branch**: main
 - **Plugin Version**: 1.2.1 (engineering-plugin)
 
 ## Progress Log
@@ -45,6 +45,9 @@
 - [2026-09-04 07:45] @jwanga: Issue #6 gate — accepted defaults: ETags + bodies cached together in `HERDR_PLUGIN_STATE_DIR/etag-cache.json` (≤2 MB); ACTIVITY section at the bottom (open, 10 rows) and 2-minute row highlights; `HERDR_GITHUB_STATUS_DEBUG=1` appends request statuses to `debug.log`.
 - [2026-09-04 08:20] @jwanga: Issue #6 implemented on `issue-6-realtime-activity`: `cache.rs` (persisted ETag cache), `activity.rs` (snapshot diff → events for issues/milestones/PRs/runs), `Client::get_cached` (If-None-Match, 304 → cached body) used by all list/run/check fetches, debug log, header rate budget (`4.9k`, red under 200), `App::events`/`recent` highlights, ACTIVITY tree section. 41 tests.
 - [2026-09-04 09:00] @jwanga: PR #17 reviewed by 3 agents (0 Critical, 19 Important) — all auto-fixed (rule #15): feed keyed by `owner/name` (branch checkouts keep it; NoRepo/other-repo resets it via `events_repo`); previous runs kept when a runs fetch fails; review None→Some and window re-entry (issue/PR/run numbers below the previous max) no longer produce events; cache stores compact re-serialized models (`Serialize` on model types), evicts untouched URLs per fetch, and recovers from undecodable cached bodies; pure `resolve_page` + test; verb truncation and flatten-time ages for activity rows; `run_icon` reused; `Event.title`/`changed`/`save_cache` dropped; REQUIREMENTS Architecture lists `cache.rs`/`activity.rs`; README notes 304s only skip the rate limit with a token (verified live by the reviewer). 43 tests.
+- [2026-09-04 09:30] @jwanga: Issue #6 done — PR #17 merged after a verification pass (two edge cases fixed: `created_at`-based new-item rule, `latest` kept across same-repo checkouts). Milestone 1 "Status pane core" complete (6/6): GitHub milestone closed, REQUIREMENTS box checked. Unguided scope = milestone, so this run stops here; run `/next` to start milestone 2 (issues #7–#9) or `/next all` to roll through everything.
+- [2026-09-04 09:30] @jwanga: Refreshed architecture diagram (trigger: issue-close #6, diagram type: flowchart)
+- [2026-09-04 09:30] @jwanga: Marketplace: the repo is indexed at herdr.dev/plugins (index `https://assets.herdr.dev/plugins/index.json`) as "GitHub Status" 0.1.0 since 2026-09-04 08:00 UTC; `herdr plugin install jwanga/herdr-plugin-github-status` builds from source until #9 ships prebuilt binaries.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

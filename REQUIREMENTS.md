@@ -15,7 +15,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 - [Architecture](#architecture)
 
 ## Milestones
-- [ ] **Status pane core** — A Rust/ratatui TUI shipped as a herdr plugin pane. Docks on the right at the left sidebar's width, detects the workspace's GitHub repository, and renders milestones → issues, unassigned issues, pull requests, and Actions/check runs, polling GitHub continuously so state changes appear within seconds. Keyboard and mouse navigation, expand/collapse, open-in-browser.
+- [x] **Status pane core** — A Rust/ratatui TUI shipped as a herdr plugin pane. Docks on the right at the left sidebar's width, detects the workspace's GitHub repository, and renders milestones → issues, unassigned issues, pull requests, and Actions/check runs, polling GitHub continuously so state changes appear within seconds. Keyboard and mouse navigation, expand/collapse, open-in-browser.
 - [ ] **Auto-dock, configuration, and publishing** — Event hooks keep a status pane present in every tab/workspace (with snooze when the user closes it), width re-applies on terminal resize, a user config file (interval, width, auto-open, sections), a GitHub Release workflow with prebuilt binaries plus a fetch-or-build install step, README/marketplace metadata, and the `herdr-plugin` topic on a public repository.
 
 ## Requirements
