@@ -1,7 +1,7 @@
 //! Resolve the GitHub repository (owner/name) and branch for a working directory.
 
+use crate::util;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRef {
@@ -18,16 +18,11 @@ impl RepoRef {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(cwd).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    // `-C` rather than `current_dir`: a nonexistent cwd then fails inside git (None) instead
+    // of erroring on spawn.
+    let mut full = vec!["-C", cwd.to_str()?];
+    full.extend_from_slice(args);
+    util::stdout("git", &full, None)
 }
 
 /// Parse a GitHub remote URL in ssh, scp-like, https, or bare `github.com/o/r` form.

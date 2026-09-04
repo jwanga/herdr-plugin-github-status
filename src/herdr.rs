@@ -75,6 +75,13 @@ pub struct Pane {
     pub focused: bool,
 }
 
+impl Pane {
+    /// The pane's live working directory (foreground process), else its launch cwd.
+    pub fn live_cwd(&self) -> Option<String> {
+        self.foreground_cwd.clone().or_else(|| self.cwd.clone())
+    }
+}
+
 pub fn pane_list(workspace: Option<&str>) -> Result<Vec<Pane>> {
     let mut args = vec!["pane", "list"];
     if let Some(ws) = workspace {

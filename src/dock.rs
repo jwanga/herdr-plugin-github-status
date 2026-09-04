@@ -294,7 +294,7 @@ fn open(ctx: &ActionContext, focused: Option<&Pane>, panes: &[Pane]) -> Result<(
     let target = open_target(&layout)?;
     // Live cwd of the focused pane beats the launch cwd from the context.
     let cwd = focused
-        .and_then(|p| p.foreground_cwd.clone().or_else(|| p.cwd.clone()))
+        .and_then(Pane::live_cwd)
         .or_else(|| ctx.focused_pane_cwd.clone())
         .or_else(|| ctx.workspace_cwd.clone());
     let plugin_id = std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| PLUGIN_ID.to_string());

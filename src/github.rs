@@ -2,10 +2,10 @@
 
 use crate::model::{Issue, Milestone, PullRequest, Snapshot};
 use crate::repo::RepoRef;
+use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
-use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
 
 const API: &str = "https://api.github.com";
@@ -27,21 +27,44 @@ pub fn discover_token() -> Option<String> {
             }
         }
     }
-    let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!token.is_empty()).then_some(token)
+    util::stdout("gh", &["auth", "token"], None)
 }
 
-/// `status` and `etag` feed the conditional-request cache (issue #6).
-#[allow(dead_code)]
+/// GitHub asked us to stop until `until` (primary or secondary rate limit).
+#[derive(Debug)]
+pub struct RateLimited {
+    pub until: SystemTime,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secs = self.until.duration_since(SystemTime::now()).map(|d| d.as_secs()).unwrap_or(0);
+        write!(f, "GitHub rate limit reached; retrying in {secs}s")
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
 pub struct Page<T> {
-    pub status: u16,
+    /// `None` on a 304 Not Modified.
     pub items: Option<T>,
+    /// Feeds the conditional-request cache (issue #6).
+    #[allow(dead_code)]
     pub etag: Option<String>,
     pub next: Option<String>,
+}
+
+/// When to retry after a 403/429: `Retry-After` seconds (secondary limit), else the primary
+/// limit's reset time when the remaining budget is exhausted, else `None` (a plain 403).
+pub fn rate_limit_until(status: u16, retry_after: Option<u64>, reset_epoch: Option<u64>, remaining: Option<u32>) -> Option<SystemTime> {
+    if let Some(secs) = retry_after {
+        return Some(SystemTime::now() + Duration::from_secs(secs.max(1)));
+    }
+    if status == 429 || remaining == Some(0) {
+        let reset = reset_epoch.map(|e| UNIX_EPOCH + Duration::from_secs(e));
+        return Some(reset.unwrap_or_else(|| SystemTime::now() + Duration::from_secs(60)));
+    }
+    None
 }
 
 /// The `rel="next"` URL from a `Link` header.
@@ -68,8 +91,20 @@ impl Client {
         self.token.is_some()
     }
 
-    /// One GET; a 304 yields `items: None`.
+    /// One GET; a 304 yields `items: None`. Follows a single redirect (a renamed or
+    /// transferred repository answers 301) since the agent itself has redirects disabled.
     pub fn get<T: DeserializeOwned>(&mut self, url: &str, etag: Option<&str>) -> Result<Page<T>> {
+        match self.get_once(url, etag)? {
+            Ok(page) => Ok(page),
+            Err(location) => match self.get_once(&location, etag)? {
+                Ok(page) => Ok(page),
+                Err(_) => bail!("repository was moved more than once; update the git remote"),
+            },
+        }
+    }
+
+    /// `Ok(Err(location))` signals a redirect to follow.
+    fn get_once<T: DeserializeOwned>(&mut self, url: &str, etag: Option<&str>) -> Result<std::result::Result<Page<T>, String>> {
         let mut req = self
             .agent
             .get(url)
@@ -93,13 +128,27 @@ impl Client {
         }
         let etag = header("etag");
         let next = header("link").and_then(|l| next_link(&l));
+        let location = header("location");
+        let retry_after = header("retry-after").and_then(|v| v.parse::<u64>().ok());
+        let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<u64>().ok());
+        let remaining = header("x-ratelimit-remaining").and_then(|v| v.parse::<u32>().ok());
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string().context("reading response body")?;
         match status {
-            200 => Ok(Page { status, items: Some(serde_json::from_str(&body).context("decoding JSON")?), etag, next }),
-            304 => Ok(Page { status, items: None, etag, next }),
+            200 => Ok(Ok(Page { items: Some(serde_json::from_str(&body).context("decoding JSON")?), etag, next })),
+            304 => Ok(Ok(Page { items: None, etag, next })),
+            301 | 307 | 308 => match location {
+                Some(l) if l.starts_with(API) => Ok(Err(l)),
+                _ => bail!("repository was renamed or moved (HTTP {status}); update the git remote"),
+            },
             401 => bail!("GitHub rejected the token (401)"),
-            403 | 429 => bail!("GitHub rate limit or access denied ({status})"),
+            403 | 429 => {
+                let until = rate_limit_until(status, retry_after, reset, remaining);
+                match until {
+                    Some(until) => Err(RateLimited { until }.into()),
+                    None => bail!("GitHub denied access ({status})"),
+                }
+            }
             404 => bail!("repository not found or not accessible (404)"),
             _ => Err(anyhow!("GitHub returned HTTP {status}")),
         }
@@ -150,7 +199,19 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::next_link;
+    use super::{next_link, rate_limit_until};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rate_limit_backoff_rules() {
+        let now = SystemTime::now();
+        let ra = rate_limit_until(403, Some(30), None, Some(10)).unwrap();
+        assert!(ra >= now + Duration::from_secs(29));
+        let reset = 4_000_000_000u64;
+        assert_eq!(rate_limit_until(403, None, Some(reset), Some(0)), Some(UNIX_EPOCH + Duration::from_secs(reset)));
+        assert_eq!(rate_limit_until(403, None, Some(reset), Some(5)), None, "plain 403 is not a rate limit");
+        assert!(rate_limit_until(429, None, None, None).is_some());
+    }
 
     #[test]
     fn parses_next_link() {

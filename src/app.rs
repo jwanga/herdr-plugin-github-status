@@ -64,7 +64,12 @@ impl App {
                 self.snapshot = None;
                 self.status = Status::NoRepo(cwd);
             }
-            Msg::Error(e) => self.status = Status::Error(e),
+            Msg::Error { repo, message } => {
+                if self.snapshot.as_ref().is_some_and(|s| s.repo != repo) {
+                    self.snapshot = None;
+                }
+                self.status = Status::Error(message);
+            }
         }
     }
 }
@@ -109,27 +114,28 @@ fn badge() -> Span<'static> {
     Span::styled(" status ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
 }
 
-fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-    let w = area.width as usize;
+pub fn header_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match &app.snapshot {
         Some(s) => {
             let name = truncate(&s.repo.full_name(), w.saturating_sub(9));
             lines.push(Line::from(vec![badge(), Span::raw(" "), Span::styled(name, Style::default().add_modifier(Modifier::BOLD))]));
             let branch = s.repo.branch.clone().unwrap_or_else(|| "detached".into());
-            let age = age_string(s.fetched_at);
-            let mut meta = vec![
-                Span::styled("⎇ ", Style::default().fg(Color::Magenta)),
-                Span::raw(truncate(&branch, w.saturating_sub(age.len() + 4))),
-                Span::raw(" "),
-                Span::styled(age, Style::default().fg(Color::DarkGray)),
-            ];
+            // Trailing markers are reserved first so they are always visible.
+            let mut suffix = vec![Span::styled(age_string(s.fetched_at), Style::default().fg(Color::DarkGray))];
             if !s.authenticated {
-                meta.push(Span::styled(" no-token", Style::default().fg(Color::Yellow)));
+                suffix.push(Span::styled(" no-token", Style::default().fg(Color::Yellow)));
             }
             if let Status::Error(_) = app.status {
-                meta.push(Span::styled(" !", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+                suffix.push(Span::styled(" !", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
             }
+            let suffix_width: usize = suffix.iter().map(|s| s.content.chars().count()).sum();
+            let mut meta = vec![
+                Span::styled("⎇ ", Style::default().fg(Color::Magenta)),
+                Span::raw(truncate(&branch, w.saturating_sub(suffix_width + 3))),
+                Span::raw(" "),
+            ];
+            meta.extend(suffix);
             lines.push(Line::from(meta));
         }
         None => {
@@ -143,17 +149,37 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(Span::styled(truncate(&msg, w), Style::default().fg(Color::DarkGray))));
         }
     }
-    f.render_widget(Paragraph::new(lines), area);
+    lines
+}
+
+fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+    f.render_widget(Paragraph::new(header_lines(app, area.width as usize)), area);
+}
+
+/// A row with `left` spans (occupying `left_width` columns) and a dim, right-aligned count.
+fn right_count(mut left: Vec<Span<'static>>, left_width: usize, count: String, w: usize) -> Line<'static> {
+    let pad = w.saturating_sub(left_width + count.len());
+    left.push(Span::raw(" ".repeat(pad.max(1))));
+    left.push(Span::styled(count, Style::default().fg(Color::DarkGray)));
+    Line::from(left)
+}
+
+/// ` <icon> #n <title…>` sized to `w` columns.
+fn item_row(icon: &str, color: Color, number: u64, title: &str, w: usize) -> Line<'static> {
+    let num = format!("#{number}");
+    let title = truncate(title, w.saturating_sub(num.len() + icon.chars().count() + 1));
+    Line::from(vec![
+        Span::styled(icon.to_string(), Style::default().fg(color)),
+        Span::styled(num, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::raw(title),
+    ])
 }
 
 fn section(title: &str, count: String, w: usize) -> Line<'static> {
     let title = title.to_uppercase();
-    let pad = w.saturating_sub(title.len() + count.len() + 1);
-    Line::from(vec![
-        Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" ".repeat(pad.max(1))),
-        Span::styled(count, Style::default().fg(Color::DarkGray)),
-    ])
+    let width = title.len();
+    right_count(vec![Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))], width, count, w)
 }
 
 pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
@@ -185,36 +211,19 @@ pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     for m in &open_ms {
         let count = format!("{}/{}", m.closed_issues, m.total());
         let title = truncate(&m.title, w.saturating_sub(count.len() + 2));
-        let pad = w.saturating_sub(title.chars().count() + count.len() + 1);
-        lines.push(Line::from(vec![
-            Span::raw(" "),
-            Span::raw(title),
-            Span::raw(" ".repeat(pad.max(1))),
-            Span::styled(count, Style::default().fg(Color::DarkGray)),
-        ]));
+        let width = title.chars().count() + 1;
+        lines.push(right_count(vec![Span::raw(" "), Span::raw(title)], width, count, w));
     }
     lines.push(Line::from(""));
     lines.push(section("issues", format!("{} open", s.open_issues()), w));
     for i in s.issues.iter().filter(|i| i.is_open()) {
-        let num = format!("#{}", i.number);
-        lines.push(Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Green)),
-            Span::styled(num.clone(), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::raw(truncate(&i.title, w.saturating_sub(num.len() + 4))),
-        ]));
+        lines.push(item_row(" ● ", Color::Green, i.number, &i.title, w));
     }
     lines.push(Line::from(""));
     lines.push(section("pull requests", format!("{} open", s.open_prs()), w));
     for p in s.prs.iter().filter(|p| p.is_open()) {
-        let num = format!("#{}", p.number);
-        let icon = if p.draft { " ◌ " } else { " ⇄ " };
-        lines.push(Line::from(vec![
-            Span::styled(icon, Style::default().fg(if p.draft { Color::DarkGray } else { Color::Green })),
-            Span::styled(num.clone(), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::raw(truncate(&p.title, w.saturating_sub(num.len() + 4))),
-        ]));
+        let (icon, color) = if p.draft { (" ◌ ", Color::DarkGray) } else { (" ⇄ ", Color::Green) };
+        lines.push(item_row(icon, color, p.number, &p.title, w));
     }
     lines
 }
@@ -335,17 +344,53 @@ mod tests {
         let text: Vec<String> = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect();
         assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
         assert!(text[0].starts_with("MILESTONES"));
+        assert_eq!(text[0].chars().count(), 26, "section rows fill the width exactly");
         assert!(text[1].contains("1/6"));
+        assert_eq!(text[1].chars().count(), 26, "milestone rows fill the width exactly");
         assert!(text.iter().any(|t| t.contains("#2")));
         assert!(!text.iter().any(|t| t.contains("#1 ")), "closed issue should be hidden");
         assert!(text.iter().any(|t| t.contains("◌ #11")));
     }
 
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn header_keeps_markers_visible_at_26_columns() {
+        let mut app = App::new(None);
+        let mut s = snapshot();
+        s.repo.branch = Some("issue-2-repo-github-fetch".into());
+        s.authenticated = false;
+        app.snapshot = Some(s);
+        app.status = Status::Error("boom".into());
+        let text = texts(&header_lines(&app, 26));
+        assert_eq!(text.len(), 2);
+        assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
+        assert!(text[1].ends_with("no-token !"), "{:?}", text[1]);
+        assert!(text[1].starts_with("⎇ issue-"), "{:?}", text[1]);
+    }
+
     #[test]
     fn no_repo_message() {
         let mut app = App::new(None);
-        app.status = Status::NoRepo("/tmp/somewhere".into());
-        let lines = body_lines(&app, 26);
-        assert!(lines.len() >= 3);
+        app.status = Status::NoRepo("/some/very/long/path/that/does/not/fit/in/the/pane".into());
+        let text = texts(&body_lines(&app, 26));
+        assert!(text.iter().any(|t| t.contains("No GitHub remote in")));
+        assert!(text.iter().any(|t| t.contains("Watching for one")));
+        assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
+    }
+
+    #[test]
+    fn error_for_another_repo_clears_stale_snapshot() {
+        let mut app = App::new(None);
+        app.snapshot = Some(snapshot());
+        let mut other = snapshot().repo;
+        other.name = "elsewhere".into();
+        app.handle_msg(Msg::Error { repo: other, message: "404".into() });
+        assert!(app.snapshot.is_none());
+        app.snapshot = Some(snapshot());
+        app.handle_msg(Msg::Error { repo: snapshot().repo, message: "flaky".into() });
+        assert!(app.snapshot.is_some(), "same-repo errors keep the last snapshot");
     }
 }
