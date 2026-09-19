@@ -28,7 +28,7 @@ use std::time::Duration;
 const FOOTER_ROWS: u16 = 1;
 /// Activity events kept in memory.
 pub const MAX_EVENTS: usize = 50;
-/// How long a changed row stays highlighted.
+/// Default for how long a changed row stays highlighted (`recent_window_minutes`).
 pub const RECENT_WINDOW_SECS: u64 = 120;
 
 /// Tree nodes that represent an activity target (the main tree and NOW copies).
@@ -79,7 +79,13 @@ pub struct App {
 }
 
 impl App {
+    /// An app with the default configuration.
+    #[cfg(test)]
     pub fn new(cmd: Option<Sender<Cmd>>) -> Self {
+        Self::with_config(cmd, Loaded::default())
+    }
+
+    pub fn with_config(cmd: Option<Sender<Cmd>>, loaded: Loaded) -> Self {
         Self {
             snapshot: None,
             status: Status::Loading,
@@ -94,26 +100,17 @@ impl App {
             scroll: 0,
             show_help: false,
             body: Rect::new(0, header::ROWS, 26, 20),
-            view: ViewOptions::default(),
-            recent_window_secs: RECENT_WINDOW_SECS,
-            warnings: Vec::new(),
-            cmd,
-        }
-    }
-
-    pub fn with_config(cmd: Option<Sender<Cmd>>, loaded: Loaded) -> Self {
-        Self {
             view: loaded.config.view,
             recent_window_secs: loaded.config.recent_window.as_secs(),
             warnings: loaded.warnings,
-            ..Self::new(cmd)
+            cmd,
         }
     }
 
     /// Recompute the visible nodes and keep the cursor valid.
     pub fn rebuild(&mut self) {
         self.nodes = match &self.snapshot {
-            Some(s) => tree::flatten_with(
+            Some(s) => tree::flatten(
                 s,
                 &self.tree,
                 tree::now_secs(),

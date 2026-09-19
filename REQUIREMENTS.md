@@ -85,4 +85,3 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
   - `activity.rs` — diff of consecutive snapshots → activity events.
   - `poll.rs` — background thread scheduling fetches; sends snapshots over a channel.
   - `ui/` — ratatui rendering: header, section tree, activity feed, help overlay; 26-column-aware truncation.
-  - `config.rs` — config file + defaults.

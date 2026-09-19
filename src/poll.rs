@@ -12,9 +12,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// How often the followed directory is re-checked.
 pub const CWD_TICK: Duration = Duration::from_secs(2);
-/// Full snapshot interval.
+/// Default full snapshot interval (`poll_interval_secs`).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
-/// Runs-only refresh interval while a workflow run is queued or in progress.
+/// Default runs-only refresh interval while a workflow run is queued or in progress
+/// (`active_poll_interval_secs`).
 pub const ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// Fast polling stops below this many remaining requests.
 pub const FAST_POLL_MIN_BUDGET: u32 = 500;

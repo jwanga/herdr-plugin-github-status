@@ -43,7 +43,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some("sidebar-width") => {
-            println!("{}", dock::sidebar_width());
+            println!("{}", dock::target_width(config::load().config.width));
             Ok(())
         }
         Some("dock") => args

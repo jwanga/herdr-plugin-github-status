@@ -242,19 +242,8 @@ pub fn run_elapsed(r: &WorkflowRun, now: u64) -> Option<u64> {
 /// Activity rows shown when the section is expanded.
 pub const ACTIVITY_ROWS: usize = 10;
 
-#[cfg(test)]
+/// `opts` carries the user's section order/visibility and recently-closed window.
 pub fn flatten(
-    s: &Snapshot,
-    state: &TreeState,
-    now: u64,
-    agents: &[AgentInfo],
-    events: &[Event],
-) -> Vec<Node> {
-    flatten_with(s, state, now, agents, events, &ViewOptions::default())
-}
-
-/// `flatten` with the user's section order/visibility and recently-closed window.
-pub fn flatten_with(
     s: &Snapshot,
     state: &TreeState,
     now: u64,
@@ -1063,7 +1052,7 @@ mod tests {
         }
     }
     fn nodes(s: &Snapshot, st: &TreeState, now: u64) -> Vec<Node> {
-        flatten(s, st, now, &[], &[])
+        flatten(s, st, now, &[], &[], &ViewOptions::default())
     }
     fn snap() -> Snapshot {
         Snapshot {
@@ -1197,7 +1186,7 @@ mod tests {
             recent_closed_secs: 48 * 3600,
             ..ViewOptions::default()
         };
-        let ids: Vec<NodeId> = flatten_with(&s, &st, NOW, &[], &[], &wide)
+        let ids: Vec<NodeId> = flatten(&s, &st, NOW, &[], &[], &wide)
             .into_iter()
             .map(|n| n.id)
             .collect();
@@ -1325,7 +1314,7 @@ mod tests {
         s.prs[0].head.sha = "abc".into();
         let mut st = TreeState::default();
         st.toggle(&NodeId::Pr(20));
-        let nodes = flatten(&s, &st, NOW, &[], &[]);
+        let nodes = flatten(&s, &st, NOW, &[], &[], &ViewOptions::default());
         let t = texts(&nodes, 26);
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
         assert!(
@@ -1372,7 +1361,14 @@ mod tests {
         };
         let mut events: Vec<Event> = (0..12).map(|k| ev(k, Kind::IssueClosed)).collect();
         events[1].kind = Kind::PrReview("APPROVED".into());
-        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &events);
+        let nodes = flatten(
+            &s,
+            &TreeState::default(),
+            NOW,
+            &[],
+            &events,
+            &ViewOptions::default(),
+        );
         let a = nodes
             .iter()
             .position(|n| n.id == NodeId::Section(Section::Activity))
@@ -1392,7 +1388,14 @@ mod tests {
             label: "Continuous Integration".into(),
             url: None,
         }];
-        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &old);
+        let nodes = flatten(
+            &s,
+            &TreeState::default(),
+            NOW,
+            &[],
+            &old,
+            &ViewOptions::default(),
+        );
         let t = texts(&nodes, 26);
         let row = &t[nodes.iter().position(|n| n.id == NodeId::Event(0)).unwrap()];
         assert_eq!(row.chars().count(), 26, "{row:?}");
@@ -1424,7 +1427,14 @@ mod tests {
             status: "idle".into(),
             title: None,
         }];
-        let nodes = flatten(&s, &TreeState::default(), NOW, &agents, &[]);
+        let nodes = flatten(
+            &s,
+            &TreeState::default(),
+            NOW,
+            &agents,
+            &[],
+            &ViewOptions::default(),
+        );
         let t = texts(&nodes, 26);
         assert!(t[0].ends_with("idle"), "{:?}", t[0]);
         assert_eq!(nodes[1].id, NodeId::Idle);
@@ -1434,7 +1444,14 @@ mod tests {
             .any(|n| matches!(n.id, NodeId::NowPr(_) | NodeId::NowIssue(_))));
         // A branch whose issue is out of view still counts as active.
         s.repo.branch = Some("issue-99-x".into());
-        let nodes = flatten(&s, &TreeState::default(), NOW, &[], &[]);
+        let nodes = flatten(
+            &s,
+            &TreeState::default(),
+            NOW,
+            &[],
+            &[],
+            &ViewOptions::default(),
+        );
         let t = texts(&nodes, 26);
         assert!(t[0].ends_with("idle"), "no busy agents: {:?}", t[0]);
         assert_eq!(nodes[1].id, NodeId::NowIssue(99));
@@ -1467,7 +1484,7 @@ mod tests {
         }];
         let mut st = TreeState::default();
         st.toggle(&NodeId::Pr(20));
-        let nodes = flatten(&s, &st, NOW, &agents, &[]);
+        let nodes = flatten(&s, &st, NOW, &agents, &[], &ViewOptions::default());
         let t = texts(&nodes, 26);
         assert!(t.iter().all(|l| l.chars().count() == 26), "{t:?}");
         assert!(
@@ -1508,7 +1525,7 @@ mod tests {
             .unwrap();
         assert!(t[g].contains("recently merged"), "{:?}", t[g]);
         st.toggle(&NodeId::RecentPrs);
-        let nodes = flatten(&s, &st, NOW, &agents, &[]);
+        let nodes = flatten(&s, &st, NOW, &agents, &[], &ViewOptions::default());
         assert!(nodes.iter().any(|n| n.id == NodeId::Pr(21)));
         let t = texts(&nodes, 26);
         let p21 = nodes.iter().position(|n| n.id == NodeId::Pr(21)).unwrap();

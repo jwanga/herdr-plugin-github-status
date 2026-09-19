@@ -58,9 +58,10 @@ pub fn dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
+    let plugin_id = std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| PLUGIN_ID.to_string());
     crate::util::stdout(
         &crate::herdr::bin(),
-        &["plugin", "config-dir", PLUGIN_ID],
+        &["plugin", "config-dir", &plugin_id],
         None,
     )
     .map(|out| PathBuf::from(out.trim()))
