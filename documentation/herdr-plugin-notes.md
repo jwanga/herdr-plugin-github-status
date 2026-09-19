@@ -51,6 +51,14 @@ not live), focused_pane_agent/status, selected_text, clicked_url, worktree{repo_
 
 `plugin action invoke` resolves context from the **focused** workspace regardless of caller pane.
 
+Hooks (verified 2026-09-18): an `[[events]]` command gets `HERDR_PLUGIN_EVENT=tab.created` and
+`HERDR_PLUGIN_EVENT_JSON={"event":"tab_created","data":{"type":"tab_created","tab":{...}}}`, and
+`HERDR_PLUGIN_CONTEXT_JSON` describes the **event's** tab (`tab_id`, `focused_pane_id` = its root
+pane, `invocation_source: "api"`, `correlation_id` = event name) even when that tab is not focused;
+`HERDR_TAB_ID` / `HERDR_PANE_ID` match. herdr hot-reloads a linked plugin's manifest, so edited hooks
+go live without `plugin link`. `herdr pane send-keys <pane> ctrl+q` works; `herdr tab list` covers
+every workspace; `herdr tab focus <tab>`.
+
 ## CLI surface used by this plugin
 - `herdr plugin install owner/repo[/subdir] [--ref REF] [--yes]`, `plugin link <path> [--disabled]`,
   `plugin unlink <id>`, `plugin uninstall`, `plugin list [--json]`, `plugin enable|disable <id>`,

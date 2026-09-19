@@ -23,7 +23,10 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 ### Pane and layout
 - The plugin registers a `[[panes]]` entrypoint with id `status`, title `status`, placement `split`.
 - Opening the pane splits the rightmost full-height pane of the tab (the focused pane on ties) to the **right** via `plugin pane open`, then snaps the new pane to the herdr sidebar width with `pane resize`: `sidebar_width` from `~/.config/herdr/session.json`, else 26 columns.
-- The pane keeps its column width when the surrounding tab is resized (re-applies the split ratio).
+- The pane keeps its column width when the split around it changes size (terminal resize, sidebar toggle, a neighbouring split moved): it re-applies the width. A resize the user makes by hand — the pane's width changes while the surrounding split does not — is adopted as the width to hold for the life of that pane.
+- Auto-dock: `[[events]]` hooks on `workspace.created`, `tab.created`, `tab.focused`, `pane.focused` run `dock ensure`, which docks a pane in the event's tab without taking focus. It is idempotent, takes a per-tab `mkdir` lock, skips zoomed tabs and tabs narrower than three pane widths, and docks in every workspace, GitHub repository or not.
+- A tab is docked automatically at most once per herdr session: once its pane has been closed — `q`, the `toggle`/`close` actions (which also write a snooze marker that survives restarts), or herdr's own close-pane — it stays closed until the user toggles it back. A `[[startup]]` hook forgets docked panes that a herdr restart did not restore, and snoozes of tabs that no longer exist.
+- `toggle`/`close` shut the pane gracefully: `ctrl+q` to the TUI, a short wait, then `pane close` for anything still open.
 - Actions: `open`, `close`, `toggle` (contexts: workspace, pane). Opening is idempotent per tab; toggling closes an existing status pane.
 - The pane never steals focus when opened by a hook; a manual open focuses it.
 
@@ -69,8 +72,10 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 - **`herdr-plugin.toml`** — manifest: pane `status`, actions `open`/`close`/`toggle`, event hooks (milestone 2), build step.
 - **`herdr/launch.sh`** — single entrypoint: fixes PATH, finds the binary (`bin/` then `target/release/`), runs the TUI with no arguments or forwards `dock <mode>`; `herdr/pane.sh` is the action wrapper that calls it.
 - **Rust crate `herdr-github-status`** (`src/`):
-  - `main.rs` — CLI: default runs the TUI; `dock <toggle|open|close>` implements the actions; `sidebar-width` prints the target width.
-  - `dock.rs` — dock logic: sidebar width, split-target selection, open + exact-width snap, per-tab detection of existing status panes via `pane process-info`.
+  - `main.rs` — CLI: default runs the TUI; `dock <toggle|open|close>` implements the actions and `dock <ensure|startup>` the hooks; `sidebar-width` prints the target width.
+  - `dock.rs` — dock logic: sidebar width, split-target selection, open + exact-width snap, per-tab detection of existing status panes via `pane process-info`, the auto-dock `ensure` hook, graceful close.
+  - `state.rs` — per-tab files in the state directory: docked pane record, snooze marker, hook lock.
+  - `sizer.rs` — background thread in the TUI that, on terminal resize events, re-snaps the pane width or adopts a manual resize.
   - `herdr.rs` — wrapper over `HERDR_BIN_PATH` JSON commands (pane list/layout/resize/rename/close, plugin pane open, agent list) with typed errors.
   - `repo.rs` — cwd → owner/repo + branch resolution via git.
   - `github.rs` — REST + GraphQL client (ureq) with conditional requests, rate-limit tracking; fetches milestones, issues, PRs, workflow runs, check runs.

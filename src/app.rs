@@ -4,6 +4,8 @@
 use crate::activity::{self, Target};
 use crate::model::{AgentInfo, Snapshot};
 use crate::poll::{self, Cmd, Msg};
+use crate::sizer;
+use crate::state::TabState;
 use crate::ui::tree::{self, Node, NodeId, TreeState};
 use crate::ui::{header, help, wrap};
 use crate::util::open_url;
@@ -333,10 +335,18 @@ pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let mut app = App::new(Some(cmd_tx.clone()));
-    let result = event_loop(&mut terminal, &mut app, &msg_rx);
+    let sizer = sizer::spawn();
+    let result = event_loop(&mut terminal, &mut app, &msg_rx, sizer.as_ref());
     let _ = cmd_tx.send(Cmd::Quit);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    // Quitting with a key is the user closing the pane: keep it closed for this tab until
+    // they toggle it back. (A killed pane never gets here; a hand-run binary is not a pane.)
+    if app.should_quit && std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some() {
+        if let Ok(tab) = std::env::var("HERDR_TAB_ID") {
+            TabState::open().snooze(&tab);
+        }
+    }
     result
 }
 
@@ -344,6 +354,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     msg_rx: &Receiver<Msg>,
+    sizer: Option<&Sender<()>>,
 ) -> Result<()> {
     while !app.should_quit {
         while let Ok(msg) = msg_rx.try_recv() {
@@ -351,7 +362,14 @@ fn event_loop(
         }
         terminal.draw(|f| draw(f, app))?;
         if event::poll(Duration::from_millis(250))? {
-            app.handle_event(event::read()?);
+            match event::read()? {
+                Event::Resize(..) => {
+                    if let Some(sizer) = sizer {
+                        let _ = sizer.send(());
+                    }
+                }
+                ev => app.handle_event(ev),
+            }
         }
     }
     Ok(())

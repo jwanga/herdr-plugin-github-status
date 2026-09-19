@@ -43,6 +43,11 @@ The pane follows the working directory of the workspace's focused pane (so point
 
 The pane docks on the right of the current tab at the same width as herdr's left sidebar (read live from herdr's `session.json`, default 26 columns). `toggle` closes an open status pane in the tab; `open` focuses an existing one; `close` closes every status pane in the workspace. Note that `herdr plugin action invoke` targets the *focused* workspace, wherever you run it.
 
+### Auto-dock
+Once the plugin is enabled, a status pane docks itself in every tab the first time you create or focus it — in every workspace, whether or not it is a GitHub repository — and never takes focus when it does. Close it (`q`, the `toggle`/`close` actions, or herdr's close-pane) and it stays closed for that tab until you `toggle` it back; closing with `q` or an action is remembered across herdr restarts. Zoomed tabs and tabs narrower than three pane widths are skipped.
+
+The pane holds its column width when the terminal, the sidebar, or a neighbouring split changes size. If you drag the pane's edge yourself, that becomes the width it holds until it is closed.
+
 ### Keys
 | Key | Action |
 | --- | --- |

@@ -2,7 +2,7 @@
 //!
 //! Invocations:
 //! - `herdr-github-status`                 run the status TUI (the plugin pane entrypoint)
-//! - `herdr-github-status dock <mode>`     open / close / toggle the pane (action entrypoint)
+//! - `herdr-github-status dock <mode>`     toggle | open | close (actions), ensure | startup (hooks)
 //! - `herdr-github-status sidebar-width`   print the column width the pane will use
 //! - `herdr-github-status --version`
 
@@ -15,6 +15,8 @@ mod herdr;
 mod model;
 mod poll;
 mod repo;
+mod sizer;
+mod state;
 mod ui;
 mod util;
 
@@ -44,7 +46,7 @@ fn main() -> ExitCode {
             .parse::<dock::Mode>()
             .and_then(dock::run),
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command '{other}'; use: dock <toggle|open|close>, sidebar-width, --version"
+            "unknown command '{other}'; use: dock <toggle|open|close|ensure|startup>, sidebar-width, --version"
         )),
     };
     match result {
