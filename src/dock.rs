@@ -13,6 +13,8 @@ pub const DEFAULT_WIDTH: u32 = 26;
 const MIN_AREA_WIDTHS: u32 = 3;
 /// How long a status pane gets to exit after `ctrl+q` before its pane is closed.
 const QUIT_WAIT: Duration = Duration::from_secs(1);
+/// How long an explicit open waits for a hook that is docking the same tab.
+const LOCK_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -135,37 +137,34 @@ fn parent_split(layout: &Layout, pane: &str) -> Result<(String, u32, f64)> {
     Ok((left.pane_id.clone(), split.rect.width, split.ratio))
 }
 
-/// (columns of the split holding `pane`, columns of `pane`).
-pub fn measure(pane: &str) -> Result<(u32, u32)> {
-    let layout = herdr::pane_layout(pane)?;
-    let (_, total, _) = parent_split(&layout, pane)?;
+/// (columns of the split holding `pane`, columns of `pane`, the split's ratio).
+fn widths(layout: &Layout, pane: &str) -> Result<(u32, u32, f64)> {
+    let (_, total, ratio) = parent_split(layout, pane)?;
     let width = layout
         .panes
         .iter()
         .find(|p| p.pane_id == pane)
         .map(|p| p.rect.width)
         .ok_or_else(|| anyhow!("pane {pane} not in its own layout"))?;
+    Ok((total, width, ratio))
+}
+
+/// (columns of the split holding `pane`, columns of `pane`).
+pub fn measure(pane: &str) -> Result<(u32, u32)> {
+    let (total, width, _) = widths(&herdr::pane_layout(pane)?, pane)?;
     Ok((total, width))
 }
 
 /// Resize `pane` (already opened as a right split) to exactly `width` columns, verifying
 /// the result and nudging once more if herdr's rounding landed one column off.
 pub fn snap_width(pane: &str, width: u32) -> Result<u32> {
-    let mut layout = herdr::pane_layout(pane)?;
     for _ in 0..3 {
-        let me_width = layout
-            .panes
-            .iter()
-            .find(|p| p.pane_id == pane)
-            .map(|p| p.rect.width)
-            .ok_or_else(|| anyhow!("pane {pane} not in its own layout"))?;
-        let (_, total, current) = parent_split(&layout, pane)?;
+        let (total, me_width, current) = widths(&herdr::pane_layout(pane)?, pane)?;
         let want = clamp_width(total, width);
         if me_width == want {
             return Ok(me_width);
         }
-        let target = ratio_for_right_width(total, want);
-        let mut delta = target - current;
+        let mut delta = ratio_for_right_width(total, want) - current;
         if delta.abs() < 0.0005 {
             // Ratio already "right" but the width is off: nudge by one column.
             delta = if me_width > want { 1.0 } else { -1.0 } / f64::from(total);
@@ -175,15 +174,8 @@ pub fn snap_width(pane: &str, width: u32) -> Result<u32> {
         if !herdr::pane_resize(pane, direction, delta.abs())? {
             bail!("herdr refused to resize {pane}");
         }
-        layout = herdr::pane_layout(pane)?;
     }
-    let me_width = layout
-        .panes
-        .iter()
-        .find(|p| p.pane_id == pane)
-        .map(|p| p.rect.width)
-        .unwrap_or(0);
-    let (_, total, _) = parent_split(&layout, pane)?;
+    let (total, me_width, _) = widths(&herdr::pane_layout(pane)?, pane)?;
     let want = clamp_width(total, width);
     if me_width == want {
         Ok(me_width)
@@ -305,7 +297,7 @@ pub fn run(mode: Mode) -> Result<()> {
 
     if mode == Mode::Ensure {
         let tab = tab_id.ok_or_else(|| anyhow!("no tab context for the auto-dock hook"))?;
-        return ensure(&state, &ctx, &tab, focused.as_ref(), &panes);
+        return ensure(&state, &ctx, &ws, &tab);
     }
 
     let existing = find_status_panes(&panes).context("probing panes")?;
@@ -324,57 +316,100 @@ pub fn run(mode: Mode) -> Result<()> {
             close_all(&state, &existing)
         }
         Mode::Toggle if !in_tab.is_empty() => close_all(&state, &in_tab),
-        Mode::Open if !in_tab.is_empty() => {
-            let pane = &in_tab[0].pane_id;
-            herdr::pane_focus(pane).ok();
-            println!("open: already open ({pane}) in {ws}");
+        Mode::Open if !in_tab.is_empty() => already_open(&in_tab[0].pane_id, &ws),
+        Mode::Toggle | Mode::Open => {
+            let tab = tab_id.ok_or_else(|| anyhow!("no tab to open the status pane in"))?;
+            open_explicit(&state, &ctx, &ws, &tab)
+        }
+        Mode::Ensure | Mode::Startup => unreachable!("handled above"),
+    }
+}
+
+fn already_open(pane: &str, ws: &str) -> Result<()> {
+    herdr::pane_focus(pane).ok();
+    println!("open: already open ({pane}) in {ws}");
+    Ok(())
+}
+
+/// The panes of `tab`, listed now, and the pane to dock beside: the context's focused
+/// pane when it is in this tab, else the tab's first pane.
+fn tab_panes(ctx: &ActionContext, ws: &str, tab: &str) -> Result<(Vec<Pane>, Option<Pane>)> {
+    let in_tab: Vec<Pane> = herdr::pane_list(Some(ws))
+        .context("listing workspace panes")?
+        .into_iter()
+        .filter(|p| p.tab_id == tab)
+        .collect();
+    let anchor = ctx
+        .focused_pane_id
+        .as_deref()
+        .and_then(|id| in_tab.iter().find(|p| p.pane_id == id))
+        .or_else(|| in_tab.iter().find(|p| p.focused))
+        .or(in_tab.first())
+        .cloned();
+    Ok((in_tab, anchor))
+}
+
+/// A user-requested open. Shares the hook's per-tab lock so a toggle that lands while a
+/// hook is docking the same tab cannot produce a second pane.
+fn open_explicit(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> Result<()> {
+    let deadline = Instant::now() + LOCK_WAIT;
+    let _lock = loop {
+        match state.lock(tab) {
+            Some(lock) => break lock,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            None => bail!("{tab} is being docked by another command; try again"),
+        }
+    };
+    // An explicit open ends a snooze, whoever ends up having opened the pane.
+    state.unsnooze(tab);
+    let (in_tab, anchor) = tab_panes(ctx, ws, tab)?;
+    if let Some(found) = find_status_panes(&in_tab).context("probing panes")?.first() {
+        state.set_docked(tab, &found.pane_id);
+        return already_open(&found.pane_id, ws);
+    }
+    match open(ctx, anchor.as_ref(), true)? {
+        Opened::Pane(pane) => {
+            state.set_docked(tab, &pane);
             Ok(())
         }
-        _ => match open(&ctx, focused.as_ref(), &panes, true)? {
-            Opened::Pane(pane) => {
-                // An explicit open ends a snooze.
-                state.unsnooze(&pane.tab_id);
-                state.set_docked(&pane.tab_id, &pane.pane_id);
-                Ok(())
-            }
-            Opened::Skipped(why) => bail!("{why}"),
-        },
+        Opened::Skipped(why) => bail!("{why}"),
     }
 }
 
 /// The auto-dock hook. Runs on every tab/pane focus, so the common paths (snoozed, or
 /// already handled) cost no herdr calls beyond the pane list.
-fn ensure(
-    state: &TabState,
-    ctx: &ActionContext,
-    tab: &str,
-    focused: Option<&Pane>,
-    panes: &[Pane],
-) -> Result<()> {
+fn ensure(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> Result<()> {
     if state.snoozed(tab) {
         println!("ensure: {tab} is snoozed");
         return Ok(());
     }
     // A record means this tab was docked before: either the pane is still there, or the
     // user closed it (by any means) and it stays closed until they toggle it back.
-    if let Some(pane) = state.docked(tab) {
+    let handled = |pane: String| {
         println!("ensure: {tab} already handled ({pane})");
-        return Ok(());
+        Ok(())
+    };
+    if let Some(pane) = state.docked(tab) {
+        return handled(pane);
     }
     let Some(_lock) = state.lock(tab) else {
         println!("ensure: another hook is docking {tab}");
         return Ok(());
     };
-    let in_tab: Vec<Pane> = panes.iter().filter(|p| p.tab_id == tab).cloned().collect();
+    // Several hooks fire at once for a new tab: another may have docked it between the
+    // check above and the lock, so look again and list the panes afresh.
+    if let Some(pane) = state.docked(tab) {
+        return handled(pane);
+    }
+    let (in_tab, anchor) = tab_panes(ctx, ws, tab)?;
     // Opened by hand before any record existed (or restored by herdr under a new id).
     if let Some(found) = find_status_panes(&in_tab).context("probing panes")?.first() {
         state.set_docked(tab, &found.pane_id);
         println!("ensure: found {} in {tab}", found.pane_id);
         return Ok(());
     }
-    let focused = focused.filter(|p| p.tab_id == tab).or(in_tab.first());
-    match open(ctx, focused, &in_tab, false)? {
-        Opened::Pane(pane) => state.set_docked(tab, &pane.pane_id),
+    match open(ctx, anchor.as_ref(), false)? {
+        Opened::Pane(pane) => state.set_docked(tab, &pane),
         Opened::Skipped(why) => println!("ensure: skipped {tab}: {why}"),
     }
     Ok(())
@@ -404,20 +439,15 @@ fn close_all(state: &TabState, panes: &[Pane]) -> Result<()> {
 }
 
 enum Opened {
-    Pane(Pane),
+    /// The new pane's id.
+    Pane(String),
     /// Not an error for the hook: the tab is zoomed or too narrow right now.
     Skipped(String),
 }
 
-fn open(
-    ctx: &ActionContext,
-    focused: Option<&Pane>,
-    panes: &[Pane],
-    focus: bool,
-) -> Result<Opened> {
-    let anchor = focused
-        .or(panes.first())
-        .ok_or_else(|| anyhow!("no panes to dock beside"))?;
+/// Dock a status pane in `anchor`'s tab. `focus` is also "the user asked for this".
+fn open(ctx: &ActionContext, anchor: Option<&Pane>, focus: bool) -> Result<Opened> {
+    let anchor = anchor.ok_or_else(|| anyhow!("no panes to dock beside"))?;
     let layout = herdr::pane_layout(&anchor.pane_id).context("reading tab layout")?;
     if layout.zoomed {
         return Ok(Opened::Skipped(
@@ -432,9 +462,9 @@ fn open(
         )));
     }
     let target = open_target(&layout)?;
-    // Live cwd of the focused pane beats the launch cwd from the context.
-    let cwd = focused
-        .and_then(Pane::live_cwd)
+    // Live cwd of the anchor pane beats the launch cwd from the context.
+    let cwd = anchor
+        .live_cwd()
         .or_else(|| ctx.focused_pane_cwd.clone())
         .or_else(|| ctx.workspace_cwd.clone());
     let plugin_id = std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| PLUGIN_ID.to_string());
@@ -445,13 +475,7 @@ fn open(
         Ok(cols) => println!("opened {pane} ({cols} cols, split of {target})"),
         Err(err) => eprintln!("{BIN_NAME}: opened {pane} but could not snap width: {err:#}"),
     }
-    Ok(Opened::Pane(Pane {
-        pane_id: pane,
-        tab_id: anchor.tab_id.clone(),
-        cwd,
-        foreground_cwd: None,
-        focused: focus,
-    }))
+    Ok(Opened::Pane(pane))
 }
 
 #[cfg(test)]

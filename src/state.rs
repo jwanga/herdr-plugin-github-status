@@ -122,24 +122,34 @@ impl TabState {
         let _ = std::fs::remove_file(self.path("snoozed", tab));
     }
 
-    /// Atomic per-tab lock (`mkdir`). `None` when another hook holds a fresh one.
+    /// Atomic per-tab lock (`mkdir`). `None` when another command holds a fresh one.
     pub fn lock(&self, tab: &str) -> Option<Lock> {
         let path = self.path("lock", tab);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        let owner = std::process::id().to_string();
         for _ in 0..2 {
-            match std::fs::create_dir(&path) {
-                Ok(()) => return Some(Lock { path }),
-                Err(_) if is_stale(&path) => {
-                    let _ = std::fs::remove_dir(&path);
-                }
-                Err(_) => return None,
+            if std::fs::create_dir(&path).is_ok() {
+                let _ = std::fs::write(path.join(OWNER_FILE), &owner);
+                return Some(Lock { path, owner });
             }
+            if !is_stale(&path) {
+                return None;
+            }
+            // Take a dead command's lock over by renaming it away: only one contender's
+            // rename succeeds, so two can never both clear it and both lock.
+            let grave = path.with_extension(format!("stale-{owner}"));
+            if std::fs::rename(&path, &grave).is_err() {
+                return None;
+            }
+            let _ = std::fs::remove_dir_all(&grave);
         }
         None
     }
 }
+
+const OWNER_FILE: &str = "owner";
 
 fn is_stale(path: &Path) -> bool {
     std::fs::metadata(path)
@@ -151,11 +161,18 @@ fn is_stale(path: &Path) -> bool {
 
 pub struct Lock {
     path: PathBuf,
+    owner: String,
 }
 
 impl Drop for Lock {
+    /// Only remove a lock that is still ours: a command that outlived `STALE_LOCK` may
+    /// have had it taken over.
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.path);
+        let ours =
+            std::fs::read_to_string(self.path.join(OWNER_FILE)).is_ok_and(|o| o == self.owner);
+        if ours {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -216,6 +233,16 @@ mod tests {
         assert!(s.lock("w7:t2").is_some());
         drop(held);
         assert!(s.lock("w7:t1").is_some());
+    }
+
+    #[test]
+    fn a_taken_over_lock_is_not_removed_by_its_old_owner() {
+        let s = temp("takeover");
+        let old = s.lock("w7:t1").expect("lock");
+        // Simulate a takeover by another process.
+        std::fs::write(s.path("lock", "w7:t1").join(OWNER_FILE), "someone-else").unwrap();
+        drop(old);
+        assert!(s.lock("w7:t1").is_none());
     }
 
     #[test]

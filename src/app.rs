@@ -342,7 +342,7 @@ pub fn run() -> Result<()> {
     ratatui::restore();
     // Quitting with a key is the user closing the pane: keep it closed for this tab until
     // they toggle it back. (A killed pane never gets here; a hand-run binary is not a pane.)
-    if app.should_quit && std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some() {
+    if app.should_quit && crate::is_plugin_pane() {
         if let Ok(tab) = std::env::var("HERDR_TAB_ID") {
             TabState::open().snooze(&tab);
         }

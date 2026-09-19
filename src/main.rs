@@ -27,6 +27,12 @@ pub const PLUGIN_ID: &str = "jwanga.github-status";
 pub const PANE_ENTRYPOINT: &str = "status";
 pub const PANE_LABEL: &str = "status";
 
+/// Whether this process is the plugin's pane (herdr sets the entrypoint id), as opposed
+/// to the binary run by hand in some other pane.
+pub fn is_plugin_pane() -> bool {
+    std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {

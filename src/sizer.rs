@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 /// Resize events arrive in bursts while a window is dragged; act once they settle.
 const DEBOUNCE: Duration = Duration::from_millis(120);
-/// `dock open` snaps the width in a few steps right after launch; those are not the user.
-const STARTUP_GRACE: Duration = Duration::from_secs(3);
+/// Width changes we cause ourselves are not the user dragging the edge: `dock open` snaps
+/// the width in a few steps right after launch, and so does every snap made here.
+const SELF_RESIZE_QUIET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -34,8 +35,12 @@ pub fn decide(last_total: Option<u32>, total: u32, width: u32, desired: u32) -> 
 }
 
 /// Spawn the sizer for this process's own pane. Send `()` on every terminal resize.
-/// `None` outside herdr (no `HERDR_PANE_ID`).
+/// `None` unless this is the plugin's pane: a hand-run binary must not resize the shell
+/// pane it was started from.
 pub fn spawn() -> Option<Sender<()>> {
+    if !crate::is_plugin_pane() {
+        return None;
+    }
     let pane = std::env::var("HERDR_PANE_ID")
         .ok()
         .filter(|p| !p.is_empty())?;
@@ -45,7 +50,7 @@ pub fn spawn() -> Option<Sender<()>> {
 }
 
 fn run(pane: &str, rx: &Receiver<()>) {
-    let started = Instant::now();
+    let mut quiet_until = Instant::now() + SELF_RESIZE_QUIET;
     let mut manual: Option<u32> = None;
     let mut last_total = dock::measure(pane).ok().map(|(total, _)| total);
     while rx.recv().is_ok() {
@@ -59,8 +64,9 @@ fn run(pane: &str, rx: &Receiver<()>) {
             Decision::Keep => {}
             Decision::Snap(cols) => {
                 let _ = dock::snap_width(pane, cols);
+                quiet_until = Instant::now() + SELF_RESIZE_QUIET;
             }
-            Decision::Adopt(_) if started.elapsed() < STARTUP_GRACE => {}
+            Decision::Adopt(_) if Instant::now() < quiet_until => {}
             Decision::Adopt(cols) => manual = Some(cols),
         }
         last_total = Some(total);
