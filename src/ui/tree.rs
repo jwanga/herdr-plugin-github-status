@@ -10,8 +10,25 @@ use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// How long a closed issue stays in the "recently closed" group.
+/// How long a closed issue stays in the "recently closed" group by default.
 pub const RECENT_CLOSED_SECS: u64 = 24 * 3600;
+
+/// What the user can configure about the tree: which sections appear, in what order,
+/// and how long closed items stay in the "recently closed" groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewOptions {
+    pub sections: Vec<Section>,
+    pub recent_closed_secs: u64,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        Self {
+            sections: Section::ALL.to_vec(),
+            recent_closed_secs: RECENT_CLOSED_SECS,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -24,6 +41,32 @@ pub enum Section {
 }
 
 impl Section {
+    /// Every section, in the default display order.
+    pub const ALL: [Section; 6] = [
+        Section::Now,
+        Section::Milestones,
+        Section::Issues,
+        Section::PullRequests,
+        Section::Actions,
+        Section::Activity,
+    ];
+
+    /// The name used for this section in `config.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Section::Now => "now",
+            Section::Milestones => "milestones",
+            Section::Issues => "issues",
+            Section::PullRequests => "pull_requests",
+            Section::Actions => "actions",
+            Section::Activity => "activity",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Section> {
+        Section::ALL.into_iter().find(|s| s.key() == key)
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Section::Now => "NOW",
@@ -138,10 +181,10 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether an RFC 3339 timestamp is within the recently-closed window of `now`.
-fn is_recent(ts: Option<&str>, now: u64) -> bool {
+/// Whether an RFC 3339 timestamp is within `window` seconds of `now`.
+fn is_recent(ts: Option<&str>, now: u64, window: u64) -> bool {
     ts.and_then(parse_rfc3339)
-        .is_some_and(|t| now.saturating_sub(t) <= RECENT_CLOSED_SECS)
+        .is_some_and(|t| now.saturating_sub(t) <= window)
 }
 
 /// Issue number from a branch named `issue-<n>-…` (the engineering-plugin convention).
@@ -199,6 +242,7 @@ pub fn run_elapsed(r: &WorkflowRun, now: u64) -> Option<u64> {
 /// Activity rows shown when the section is expanded.
 pub const ACTIVITY_ROWS: usize = 10;
 
+#[cfg(test)]
 pub fn flatten(
     s: &Snapshot,
     state: &TreeState,
@@ -206,252 +250,286 @@ pub fn flatten(
     agents: &[AgentInfo],
     events: &[Event],
 ) -> Vec<Node> {
+    flatten_with(s, state, now, agents, events, &ViewOptions::default())
+}
+
+/// `flatten` with the user's section order/visibility and recently-closed window.
+pub fn flatten_with(
+    s: &Snapshot,
+    state: &TreeState,
+    now: u64,
+    agents: &[AgentInfo],
+    events: &[Event],
+    opts: &ViewOptions,
+) -> Vec<Node> {
     let mut out = Vec::new();
     let repo_url = format!("https://github.com/{}/{}", s.repo.owner, s.repo.name);
     let active = active_issue(s);
-
-    // ---- Now: the active issue, the current branch's PR, and the workspace's agents.
-    let now_issue = active.and_then(|n| s.issues.iter().find(|i| i.number == n));
-    let now_pr = current_pr(s);
     let active_runs: Vec<&WorkflowRun> = s.runs.iter().filter(|r| r.is_active()).collect();
-    let busy = agents
-        .iter()
-        .filter(|a| a.status == "working" || a.status == "blocked")
-        .count()
-        + active_runs.len();
-    let idle = active.is_none() && now_pr.is_none() && active_runs.is_empty();
-    let count = if busy > 0 {
-        format!("{busy} busy")
-    } else {
-        "idle".to_string()
-    };
-    if section(
-        &mut out,
-        state,
-        Section::Now,
-        count,
-        format!("{repo_url}/pulls"),
-    ) {
-        if let Some(i) = now_issue {
-            out.push(Node {
-                id: NodeId::NowIssue(i.number),
-                depth: 1,
-                expandable: None,
-                url: Some(i.html_url.clone()),
-                kind: NodeKind::Issue {
-                    issue: i.clone(),
-                    active: true,
-                },
-            });
-        } else if let Some(n) = active {
-            out.push(Node {
-                id: NodeId::NowIssue(n),
-                depth: 1,
-                expandable: None,
-                url: Some(format!("{repo_url}/issues/{n}")),
-                kind: NodeKind::Info(format!("▶ #{n} (not in view)")),
-            });
-        }
-        if let Some(p) = now_pr {
-            out.push(Node {
-                id: NodeId::NowPr(p.number),
-                depth: 1,
-                expandable: None,
-                url: Some(p.html_url.clone()),
-                kind: NodeKind::Pr(p.clone()),
-            });
-        }
-        for r in &active_runs {
-            out.push(run_node(r, NodeId::NowRun(r.id), now));
-        }
-        if idle {
-            out.push(Node {
-                id: NodeId::Idle,
-                depth: 1,
-                expandable: None,
-                url: None,
-                kind: NodeKind::Info("nothing in progress".into()),
-            });
-        }
-        for a in agents {
-            out.push(Node {
-                id: NodeId::Agent(a.pane_id.clone()),
-                depth: 1,
-                expandable: None,
-                url: None,
-                kind: NodeKind::Agent(a.clone()),
-            });
-        }
-    }
+    let window = opts.recent_closed_secs;
 
-    // ---- Milestones: by due date (undated last), then number; closed ones in a group.
-    let mut milestones: Vec<&Milestone> = s.milestones.iter().collect();
-    milestones.sort_by(|a, b| {
-        a.due_on
-            .is_none()
-            .cmp(&b.due_on.is_none())
-            .then_with(|| a.due_on.cmp(&b.due_on))
-            .then_with(|| a.number.cmp(&b.number))
-    });
-    let (open_ms, closed_ms): (Vec<&Milestone>, Vec<&Milestone>) =
-        milestones.iter().partition(|m| m.state == "open");
-    if section(
-        &mut out,
-        state,
-        Section::Milestones,
-        open_ms.len().to_string(),
-        format!("{repo_url}/milestones"),
-    ) {
-        for m in &open_ms {
-            push_milestone(&mut out, s, state, m, active);
-        }
-        if !closed_ms.is_empty()
-            && group(
-                &mut out,
-                state,
-                NodeId::ClosedMilestones,
-                "closed",
-                closed_ms.len(),
-                format!("{repo_url}/milestones?state=closed"),
-            )
-        {
-            for m in &closed_ms {
-                push_milestone(&mut out, s, state, m, active);
+    for sec in &opts.sections {
+        match sec {
+            // ---- Now: the active issue, the current branch's PR, and the workspace's agents.
+            Section::Now => {
+                let now_issue = active.and_then(|n| s.issues.iter().find(|i| i.number == n));
+                let now_pr = current_pr(s);
+                let busy = agents
+                    .iter()
+                    .filter(|a| a.status == "working" || a.status == "blocked")
+                    .count()
+                    + active_runs.len();
+                let idle = active.is_none() && now_pr.is_none() && active_runs.is_empty();
+                let count = if busy > 0 {
+                    format!("{busy} busy")
+                } else {
+                    "idle".to_string()
+                };
+                if section(
+                    &mut out,
+                    state,
+                    Section::Now,
+                    count,
+                    format!("{repo_url}/pulls"),
+                ) {
+                    if let Some(i) = now_issue {
+                        out.push(Node {
+                            id: NodeId::NowIssue(i.number),
+                            depth: 1,
+                            expandable: None,
+                            url: Some(i.html_url.clone()),
+                            kind: NodeKind::Issue {
+                                issue: i.clone(),
+                                active: true,
+                            },
+                        });
+                    } else if let Some(n) = active {
+                        out.push(Node {
+                            id: NodeId::NowIssue(n),
+                            depth: 1,
+                            expandable: None,
+                            url: Some(format!("{repo_url}/issues/{n}")),
+                            kind: NodeKind::Info(format!("▶ #{n} (not in view)")),
+                        });
+                    }
+                    if let Some(p) = now_pr {
+                        out.push(Node {
+                            id: NodeId::NowPr(p.number),
+                            depth: 1,
+                            expandable: None,
+                            url: Some(p.html_url.clone()),
+                            kind: NodeKind::Pr(p.clone()),
+                        });
+                    }
+                    for r in &active_runs {
+                        out.push(run_node(r, NodeId::NowRun(r.id), now));
+                    }
+                    if idle {
+                        out.push(Node {
+                            id: NodeId::Idle,
+                            depth: 1,
+                            expandable: None,
+                            url: None,
+                            kind: NodeKind::Info("nothing in progress".into()),
+                        });
+                    }
+                    for a in agents {
+                        out.push(Node {
+                            id: NodeId::Agent(a.pane_id.clone()),
+                            depth: 1,
+                            expandable: None,
+                            url: None,
+                            kind: NodeKind::Agent(a.clone()),
+                        });
+                    }
+                }
             }
-        }
-    }
-
-    // ---- Issues without a milestone
-    let mut unassigned: Vec<&Issue> = s
-        .issues
-        .iter()
-        .filter(|i| i.milestone.is_none() && i.is_open())
-        .collect();
-    unassigned.sort_by_key(|i| i.number);
-    let mut recent: Vec<&Issue> = s
-        .issues
-        .iter()
-        .filter(|i| i.milestone.is_none() && !i.is_open() && is_recent(i.closed_at.as_deref(), now))
-        .collect();
-    recent.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
-    if section(
-        &mut out,
-        state,
-        Section::Issues,
-        format!("{} open", unassigned.len()),
-        format!("{repo_url}/issues"),
-    ) {
-        for i in &unassigned {
-            out.push(issue_node(i, 1, active));
-        }
-        if !recent.is_empty()
-            && group(
-                &mut out,
-                state,
-                NodeId::RecentlyClosed,
-                "recently closed",
-                recent.len(),
-                format!("{repo_url}/issues?q=is%3Aissue+is%3Aclosed+no%3Amilestone"),
-            )
-        {
-            for i in &recent {
-                out.push(issue_node(i, 2, active));
+            // ---- Milestones: by due date (undated last), then number; closed ones in a group.
+            Section::Milestones => {
+                let mut milestones: Vec<&Milestone> = s.milestones.iter().collect();
+                milestones.sort_by(|a, b| {
+                    a.due_on
+                        .is_none()
+                        .cmp(&b.due_on.is_none())
+                        .then_with(|| a.due_on.cmp(&b.due_on))
+                        .then_with(|| a.number.cmp(&b.number))
+                });
+                let (open_ms, closed_ms): (Vec<&Milestone>, Vec<&Milestone>) =
+                    milestones.iter().partition(|m| m.state == "open");
+                if section(
+                    &mut out,
+                    state,
+                    Section::Milestones,
+                    open_ms.len().to_string(),
+                    format!("{repo_url}/milestones"),
+                ) {
+                    for m in &open_ms {
+                        push_milestone(&mut out, s, state, m, active);
+                    }
+                    if !closed_ms.is_empty()
+                        && group(
+                            &mut out,
+                            state,
+                            NodeId::ClosedMilestones,
+                            "closed",
+                            closed_ms.len(),
+                            format!("{repo_url}/milestones?state=closed"),
+                        )
+                    {
+                        for m in &closed_ms {
+                            push_milestone(&mut out, s, state, m, active);
+                        }
+                    }
+                }
             }
-        }
-    }
-
-    // ---- Pull requests
-    let mut open_prs: Vec<&PullRequest> = s.prs.iter().filter(|p| p.is_open()).collect();
-    open_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let mut recent_prs: Vec<&PullRequest> = s
-        .prs
-        .iter()
-        .filter(|p| {
-            !p.is_open() && is_recent(p.closed_at.as_deref().or(p.merged_at.as_deref()), now)
-        })
-        .collect();
-    recent_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    if section(
-        &mut out,
-        state,
-        Section::PullRequests,
-        format!("{} open", open_prs.len()),
-        format!("{repo_url}/pulls"),
-    ) {
-        for p in &open_prs {
-            push_pr(&mut out, s, state, p, &repo_url);
-        }
-        if !recent_prs.is_empty()
-            && group(
-                &mut out,
-                state,
-                NodeId::RecentPrs,
-                "recently merged/closed",
-                recent_prs.len(),
-                format!("{repo_url}/pulls?q=is%3Apr+is%3Aclosed"),
-            )
-        {
-            for p in &recent_prs {
-                push_pr(&mut out, s, state, p, &repo_url);
+            // ---- Issues without a milestone
+            Section::Issues => {
+                let mut unassigned: Vec<&Issue> = s
+                    .issues
+                    .iter()
+                    .filter(|i| i.milestone.is_none() && i.is_open())
+                    .collect();
+                unassigned.sort_by_key(|i| i.number);
+                let mut recent: Vec<&Issue> = s
+                    .issues
+                    .iter()
+                    .filter(|i| {
+                        i.milestone.is_none()
+                            && !i.is_open()
+                            && is_recent(i.closed_at.as_deref(), now, window)
+                    })
+                    .collect();
+                recent.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
+                if section(
+                    &mut out,
+                    state,
+                    Section::Issues,
+                    format!("{} open", unassigned.len()),
+                    format!("{repo_url}/issues"),
+                ) {
+                    for i in &unassigned {
+                        out.push(issue_node(i, 1, active));
+                    }
+                    if !recent.is_empty()
+                        && group(
+                            &mut out,
+                            state,
+                            NodeId::RecentlyClosed,
+                            "recently closed",
+                            recent.len(),
+                            format!("{repo_url}/issues?q=is%3Aissue+is%3Aclosed+no%3Amilestone"),
+                        )
+                    {
+                        for i in &recent {
+                            out.push(issue_node(i, 2, active));
+                        }
+                    }
+                }
             }
-        }
-    }
-
-    // ---- Actions: the latest workflow runs, newest first.
-    let count = if active_runs.is_empty() {
-        s.runs.len().to_string()
-    } else {
-        format!("{} active", active_runs.len())
-    };
-    if section(
-        &mut out,
-        state,
-        Section::Actions,
-        count,
-        format!("{repo_url}/actions"),
-    ) {
-        for r in &s.runs {
-            out.push(run_node(r, NodeId::Run(r.id), now));
-        }
-        if s.runs.is_empty() {
-            out.push(Node {
-                id: NodeId::NoRuns,
-                depth: 1,
-                expandable: None,
-                url: None,
-                kind: NodeKind::Info("no workflow runs".into()),
-            });
-        }
-    }
-
-    // ---- Activity: the latest transitions, newest first.
-    if section(
-        &mut out,
-        state,
-        Section::Activity,
-        events.len().to_string(),
-        format!("{repo_url}/activity"),
-    ) {
-        for (k, e) in events.iter().take(ACTIVITY_ROWS).enumerate() {
-            out.push(Node {
-                id: NodeId::Event(k),
-                depth: 1,
-                expandable: None,
-                url: e.url.clone(),
-                kind: NodeKind::Event {
-                    event: e.clone(),
-                    age: now.saturating_sub(e.at),
-                },
-            });
-        }
-        if events.is_empty() {
-            out.push(Node {
-                id: NodeId::NoEvents,
-                depth: 1,
-                expandable: None,
-                url: None,
-                kind: NodeKind::Info("no changes seen yet".into()),
-            });
+            // ---- Pull requests
+            Section::PullRequests => {
+                let mut open_prs: Vec<&PullRequest> =
+                    s.prs.iter().filter(|p| p.is_open()).collect();
+                open_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                let mut recent_prs: Vec<&PullRequest> = s
+                    .prs
+                    .iter()
+                    .filter(|p| {
+                        !p.is_open()
+                            && is_recent(
+                                p.closed_at.as_deref().or(p.merged_at.as_deref()),
+                                now,
+                                window,
+                            )
+                    })
+                    .collect();
+                recent_prs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                if section(
+                    &mut out,
+                    state,
+                    Section::PullRequests,
+                    format!("{} open", open_prs.len()),
+                    format!("{repo_url}/pulls"),
+                ) {
+                    for p in &open_prs {
+                        push_pr(&mut out, s, state, p, &repo_url);
+                    }
+                    if !recent_prs.is_empty()
+                        && group(
+                            &mut out,
+                            state,
+                            NodeId::RecentPrs,
+                            "recently merged/closed",
+                            recent_prs.len(),
+                            format!("{repo_url}/pulls?q=is%3Apr+is%3Aclosed"),
+                        )
+                    {
+                        for p in &recent_prs {
+                            push_pr(&mut out, s, state, p, &repo_url);
+                        }
+                    }
+                }
+            }
+            // ---- Actions: the latest workflow runs, newest first.
+            Section::Actions => {
+                let count = if active_runs.is_empty() {
+                    s.runs.len().to_string()
+                } else {
+                    format!("{} active", active_runs.len())
+                };
+                if section(
+                    &mut out,
+                    state,
+                    Section::Actions,
+                    count,
+                    format!("{repo_url}/actions"),
+                ) {
+                    for r in &s.runs {
+                        out.push(run_node(r, NodeId::Run(r.id), now));
+                    }
+                    if s.runs.is_empty() {
+                        out.push(Node {
+                            id: NodeId::NoRuns,
+                            depth: 1,
+                            expandable: None,
+                            url: None,
+                            kind: NodeKind::Info("no workflow runs".into()),
+                        });
+                    }
+                }
+            }
+            // ---- Activity: the latest transitions, newest first.
+            Section::Activity => {
+                if section(
+                    &mut out,
+                    state,
+                    Section::Activity,
+                    events.len().to_string(),
+                    format!("{repo_url}/activity"),
+                ) {
+                    for (k, e) in events.iter().take(ACTIVITY_ROWS).enumerate() {
+                        out.push(Node {
+                            id: NodeId::Event(k),
+                            depth: 1,
+                            expandable: None,
+                            url: e.url.clone(),
+                            kind: NodeKind::Event {
+                                event: e.clone(),
+                                age: now.saturating_sub(e.at),
+                            },
+                        });
+                    }
+                    if events.is_empty() {
+                        out.push(Node {
+                            id: NodeId::NoEvents,
+                            depth: 1,
+                            expandable: None,
+                            url: None,
+                            kind: NodeKind::Info("no changes seen yet".into()),
+                        });
+                    }
+                }
+            }
         }
     }
     out
@@ -1114,6 +1192,16 @@ mod tests {
             .map(|n| n.id)
             .collect();
         assert!(!ids.contains(&NodeId::RecentlyClosed));
+        // A configured 48 h window keeps the issue closed 25 h ago.
+        let wide = ViewOptions {
+            recent_closed_secs: 48 * 3600,
+            ..ViewOptions::default()
+        };
+        let ids: Vec<NodeId> = flatten_with(&s, &st, NOW, &[], &[], &wide)
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(ids.contains(&NodeId::Issue(9)));
         st.toggle(&NodeId::Section(Section::Milestones));
         let ids: Vec<NodeId> = nodes(&s, &st, NOW).into_iter().map(|n| n.id).collect();
         assert_eq!(

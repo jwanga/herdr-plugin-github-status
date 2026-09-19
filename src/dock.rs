@@ -1,6 +1,7 @@
 //! Docking: open / close / toggle the status pane on the right edge of the current tab,
 //! sized to herdr's sidebar width.
 
+use crate::config::{self, Config, Width};
 use crate::herdr::{self, Layout, Pane};
 use crate::state::TabState;
 use crate::{BIN_NAME, PANE_ENTRYPOINT, PANE_LABEL, PLUGIN_ID};
@@ -51,6 +52,14 @@ pub fn sidebar_width() -> u32 {
         .ok()
         .and_then(|s| parse_session_width(&s))
         .unwrap_or(DEFAULT_WIDTH)
+}
+
+/// The pane's column width: the configured count, or herdr's sidebar width.
+pub fn target_width(width: Width) -> u32 {
+    match width {
+        Width::Sidebar => sidebar_width(),
+        Width::Columns(cols) => cols,
+    }
 }
 
 fn herdr_config_dir() -> std::path::PathBuf {
@@ -276,6 +285,8 @@ pub fn run(mode: Mode) -> Result<()> {
         println!("startup: forgot {panes} stale pane(s), {tabs} closed tab(s)");
         return Ok(());
     }
+    // A broken config file must not break docking; the pane itself reports the problems.
+    let config = config::load().config;
     let ctx = action_context();
     let ws = ctx
         .workspace_id
@@ -297,7 +308,7 @@ pub fn run(mode: Mode) -> Result<()> {
 
     if mode == Mode::Ensure {
         let tab = tab_id.ok_or_else(|| anyhow!("no tab context for the auto-dock hook"))?;
-        return ensure(&state, &ctx, &ws, &tab);
+        return ensure(&state, &config, &ctx, &ws, &tab);
     }
 
     let existing = find_status_panes(&panes).context("probing panes")?;
@@ -319,7 +330,7 @@ pub fn run(mode: Mode) -> Result<()> {
         Mode::Open if !in_tab.is_empty() => already_open(&in_tab[0].pane_id, &ws),
         Mode::Toggle | Mode::Open => {
             let tab = tab_id.ok_or_else(|| anyhow!("no tab to open the status pane in"))?;
-            open_explicit(&state, &ctx, &ws, &tab)
+            open_explicit(&state, &config, &ctx, &ws, &tab)
         }
         Mode::Ensure | Mode::Startup => unreachable!("handled above"),
     }
@@ -351,7 +362,13 @@ fn tab_panes(ctx: &ActionContext, ws: &str, tab: &str) -> Result<(Vec<Pane>, Opt
 
 /// A user-requested open. Shares the hook's per-tab lock so a toggle that lands while a
 /// hook is docking the same tab cannot produce a second pane.
-fn open_explicit(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> Result<()> {
+fn open_explicit(
+    state: &TabState,
+    config: &Config,
+    ctx: &ActionContext,
+    ws: &str,
+    tab: &str,
+) -> Result<()> {
     let deadline = Instant::now() + LOCK_WAIT;
     let _lock = loop {
         match state.lock(tab) {
@@ -367,7 +384,7 @@ fn open_explicit(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> 
         state.set_docked(tab, &found.pane_id);
         return already_open(&found.pane_id, ws);
     }
-    match open(ctx, anchor.as_ref(), true)? {
+    match open(config, ctx, anchor.as_ref(), true)? {
         Opened::Pane(pane) => {
             state.set_docked(tab, &pane);
             Ok(())
@@ -378,7 +395,17 @@ fn open_explicit(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> 
 
 /// The auto-dock hook. Runs on every tab/pane focus, so the common paths (snoozed, or
 /// already handled) cost no herdr calls beyond the pane list.
-fn ensure(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> Result<()> {
+fn ensure(
+    state: &TabState,
+    config: &Config,
+    ctx: &ActionContext,
+    ws: &str,
+    tab: &str,
+) -> Result<()> {
+    if !config.auto_open {
+        println!("ensure: auto_open is off");
+        return Ok(());
+    }
     if state.snoozed(tab) {
         println!("ensure: {tab} is snoozed");
         return Ok(());
@@ -408,7 +435,7 @@ fn ensure(state: &TabState, ctx: &ActionContext, ws: &str, tab: &str) -> Result<
         println!("ensure: found {} in {tab}", found.pane_id);
         return Ok(());
     }
-    match open(ctx, anchor.as_ref(), false)? {
+    match open(config, ctx, anchor.as_ref(), false)? {
         Opened::Pane(pane) => state.set_docked(tab, &pane),
         Opened::Skipped(why) => println!("ensure: skipped {tab}: {why}"),
     }
@@ -446,7 +473,12 @@ enum Opened {
 }
 
 /// Dock a status pane in `anchor`'s tab. `focus` is also "the user asked for this".
-fn open(ctx: &ActionContext, anchor: Option<&Pane>, focus: bool) -> Result<Opened> {
+fn open(
+    config: &Config,
+    ctx: &ActionContext,
+    anchor: Option<&Pane>,
+    focus: bool,
+) -> Result<Opened> {
     let anchor = anchor.ok_or_else(|| anyhow!("no panes to dock beside"))?;
     let layout = herdr::pane_layout(&anchor.pane_id).context("reading tab layout")?;
     if layout.zoomed {
@@ -454,7 +486,7 @@ fn open(ctx: &ActionContext, anchor: Option<&Pane>, focus: bool) -> Result<Opene
             "the tab is zoomed; unzoom before opening the status pane".into(),
         ));
     }
-    let width = sidebar_width();
+    let width = target_width(config.width);
     if !focus && layout.area.width < width * MIN_AREA_WIDTHS {
         return Ok(Opened::Skipped(format!(
             "only {} columns wide",

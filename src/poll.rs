@@ -2,6 +2,7 @@
 //! resolves the GitHub repository, fetches a snapshot when the repository changes, on an
 //! interval, or on demand, and hands results to the UI over a channel.
 
+use crate::config::Config;
 use crate::github::{self, Client, RateLimited};
 use crate::herdr;
 use crate::model::{AgentInfo, Snapshot};
@@ -96,11 +97,15 @@ fn drain(cmd_rx: &Receiver<Cmd>) -> bool {
     quit
 }
 
-pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver<Msg>) {
+pub fn spawn(fallback_cwd: String, config: &Config) -> (Sender<Cmd>, Receiver<Msg>) {
+    let interval = config.poll_interval;
+    let active_interval = config.active_poll_interval;
+    let runs_limit = config.runs_limit;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
     std::thread::spawn(move || {
         let mut client = Client::new(github::discover_token(), Some(&crate::state::dir()));
+        client.runs_limit = runs_limit;
         let mut current: Option<RepoRef> = None;
         let mut latest: Option<Snapshot> = None;
         let mut last_fetch: Option<Instant> = None;
@@ -135,8 +140,8 @@ pub fn spawn(fallback_cwd: String, interval: Duration) -> (Sender<Cmd>, Receiver
             }
             let due = last_fetch.is_none_or(|t| t.elapsed() >= interval);
             let fast_due = latest.as_ref().is_some_and(fast_poll_allowed)
-                && last_fetch.is_some_and(|t| t.elapsed() >= ACTIVE_INTERVAL)
-                && last_fast.is_none_or(|t| t.elapsed() >= ACTIVE_INTERVAL);
+                && last_fetch.is_some_and(|t| t.elapsed() >= active_interval)
+                && last_fast.is_none_or(|t| t.elapsed() >= active_interval);
             let blocked = blocked_until.is_some_and(|u| SystemTime::now() < u);
             if let Some(r) = &current {
                 let failure = |e: anyhow::Error, blocked_until: &mut Option<SystemTime>| {

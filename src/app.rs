@@ -2,11 +2,12 @@
 //! the header / body / footer views from `ui`.
 
 use crate::activity::{self, Target};
+use crate::config::{self, Loaded};
 use crate::model::{AgentInfo, Snapshot};
 use crate::poll::{self, Cmd, Msg};
 use crate::sizer;
 use crate::state::TabState;
-use crate::ui::tree::{self, Node, NodeId, TreeState};
+use crate::ui::tree::{self, Node, NodeId, TreeState, ViewOptions};
 use crate::ui::{header, help, wrap};
 use crate::util::open_url;
 use anyhow::Result;
@@ -68,6 +69,12 @@ pub struct App {
     pub show_help: bool,
     /// Body geometry from the last draw, for mouse hit-testing and paging.
     pub body: Rect,
+    /// Section order/visibility and the recently-closed window, from the user config.
+    pub view: ViewOptions,
+    /// How long a changed row stays highlighted, in seconds.
+    pub recent_window_secs: u64,
+    /// Problems found in the user config, shown under the header.
+    pub warnings: Vec<String>,
     cmd: Option<Sender<Cmd>>,
 }
 
@@ -87,14 +94,33 @@ impl App {
             scroll: 0,
             show_help: false,
             body: Rect::new(0, header::ROWS, 26, 20),
+            view: ViewOptions::default(),
+            recent_window_secs: RECENT_WINDOW_SECS,
+            warnings: Vec::new(),
             cmd,
+        }
+    }
+
+    pub fn with_config(cmd: Option<Sender<Cmd>>, loaded: Loaded) -> Self {
+        Self {
+            view: loaded.config.view,
+            recent_window_secs: loaded.config.recent_window.as_secs(),
+            warnings: loaded.warnings,
+            ..Self::new(cmd)
         }
     }
 
     /// Recompute the visible nodes and keep the cursor valid.
     pub fn rebuild(&mut self) {
         self.nodes = match &self.snapshot {
-            Some(s) => tree::flatten(s, &self.tree, tree::now_secs(), &self.agents, &self.events),
+            Some(s) => tree::flatten_with(
+                s,
+                &self.tree,
+                tree::now_secs(),
+                &self.agents,
+                &self.events,
+                &self.view,
+            ),
             None => Vec::new(),
         };
         self.clamp();
@@ -162,7 +188,7 @@ impl App {
     pub fn is_recent(&self, id: &NodeId, now: u64) -> bool {
         self.recent
             .get(id)
-            .is_some_and(|t| now.saturating_sub(*t) <= RECENT_WINDOW_SECS)
+            .is_some_and(|t| now.saturating_sub(*t) <= self.recent_window_secs)
     }
 
     pub fn current(&self) -> Option<&Node> {
@@ -302,8 +328,8 @@ impl App {
                     self.events = fresh;
                     self.events.truncate(MAX_EVENTS);
                 }
-                self.recent
-                    .retain(|_, t| now.saturating_sub(*t) <= RECENT_WINDOW_SECS);
+                let window = self.recent_window_secs;
+                self.recent.retain(|_, t| now.saturating_sub(*t) <= window);
                 self.snapshot = Some(*s);
                 self.status = Status::Ok;
             }
@@ -331,11 +357,12 @@ pub fn run() -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let (cmd_tx, msg_rx) = poll::spawn(cwd, poll::POLL_INTERVAL);
+    let loaded = config::load();
+    let (cmd_tx, msg_rx) = poll::spawn(cwd, &loaded.config);
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let mut app = App::new(Some(cmd_tx.clone()));
-    let sizer = sizer::spawn();
+    let sizer = sizer::spawn(loaded.config.width);
+    let mut app = App::with_config(Some(cmd_tx.clone()), loaded);
     let result = event_loop(&mut terminal, &mut app, &msg_rx, sizer.as_ref());
     let _ = cmd_tx.send(Cmd::Quit);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -377,7 +404,7 @@ fn event_loop(
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [top, body, bottom] = Layout::vertical([
-        Constraint::Length(header::ROWS),
+        Constraint::Length(header::rows(app)),
         Constraint::Min(0),
         Constraint::Length(FOOTER_ROWS),
     ])
@@ -396,7 +423,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 pub fn body_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     if app.show_help {
-        return help::lines(w);
+        return help::lines(w, &app.warnings);
     }
     let now = tree::now_secs();
     let dim = Style::default().fg(Color::DarkGray);
@@ -686,6 +713,34 @@ mod tests {
         assert_eq!(text.len(), 2);
         assert!(text.iter().all(|t| t.chars().count() <= 26), "{text:?}");
         assert!(text[1].ends_with("no-token !"), "{:?}", text[1]);
+    }
+
+    #[test]
+    fn config_warnings_add_a_header_line_and_config_shapes_the_tree() {
+        let loaded =
+            config::parse("sections = [\"actions\", \"now\"]\nwidth = \"wide\"\nbogus = 1");
+        let mut app = App::with_config(None, loaded);
+        app.snapshot = Some(snapshot());
+        app.rebuild();
+        let sections: Vec<&NodeId> = app
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.id, NodeId::Section(_)))
+            .map(|n| &n.id)
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                &NodeId::Section(tree::Section::Actions),
+                &NodeId::Section(tree::Section::Now)
+            ]
+        );
+        assert_eq!(header::rows(&app), header::ROWS + 1);
+        let text = texts(&header::lines(&app, 26));
+        assert_eq!(text.len(), 3);
+        assert!(text[2].starts_with("⚠ "), "{:?}", text[2]);
+        assert!(text[2].chars().count() <= 26);
+        assert_eq!(header::rows(&App::new(None)), header::ROWS);
     }
 
     #[test]

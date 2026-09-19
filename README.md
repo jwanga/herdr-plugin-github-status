@@ -74,4 +74,18 @@ Every refresh is a conditional request: unchanged resources answer `304 Not Modi
 The **ACTIONS** section lists the latest workflow runs (newest first) with a status icon (`◌` queued, `◐` running, `✓` success, `✗` failure, `⊘` cancelled, `→` skipped, `!` action required), the workflow name, the branch at 36+ columns, and elapsed time or duration. Runs that are queued or in progress also appear in NOW, and while a run is queued or in progress (and a token is present with budget to spare) the pane refreshes runs and check runs every 5 seconds on top of the 10-second full refresh.
 
 ### Configuration
-Documented as features land. Config lives in the directory printed by `herdr plugin config-dir jwanga.github-status`.
+Optional. Create `config.toml` in the directory printed by `herdr plugin config-dir jwanga.github-status`. Every option can be left out; the values below are the defaults.
+
+```toml
+poll_interval_secs = 10          # seconds between full refreshes (5–3600)
+active_poll_interval_secs = 5    # seconds between run/check refreshes while a workflow run is active (2–3600)
+width = "sidebar"                # "sidebar" = match herdr's left sidebar, or a column count (16–200)
+auto_open = true                 # false: never dock by itself; use the toggle action
+sections = ["now", "milestones", "issues", "pull_requests", "actions", "activity"]
+                                 # shown in this order; leave a section out to hide it
+recent_window_minutes = 2        # how long a changed row stays highlighted (0–1440)
+recent_closed_hours = 24         # how long closed items stay in the "recently closed" groups (0–8760)
+runs_limit = 15                  # workflow runs fetched and listed (1–100)
+```
+
+Options are read when a pane launches (and by each dock action and hook), so close and reopen the pane to apply a change. An invalid or unknown option never stops the pane: that option falls back to its default, a yellow `⚠` line appears under the header, and `?` lists every problem in full.

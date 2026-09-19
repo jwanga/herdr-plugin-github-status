@@ -9,6 +9,7 @@
 mod activity;
 mod app;
 mod cache;
+mod config;
 mod dock;
 mod github;
 mod herdr;

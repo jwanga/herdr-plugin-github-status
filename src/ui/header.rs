@@ -7,6 +7,11 @@ use ratatui::text::{Line, Span};
 
 pub const ROWS: u16 = 2;
 
+/// Header height: `ROWS`, plus one line when the user config has problems.
+pub fn rows(app: &App) -> u16 {
+    ROWS + u16::from(!app.warnings.is_empty())
+}
+
 /// `4987` → `4.9k`, `312` → `312`.
 pub fn compact_count(n: u32) -> String {
     if n >= 1000 {
@@ -87,6 +92,16 @@ pub fn lines(app: &App, w: usize) -> Vec<Line<'static>> {
                 Style::default().fg(Color::DarkGray),
             )));
         }
+    }
+    if let Some(first) = app.warnings.first() {
+        let more = match app.warnings.len() {
+            1 => String::new(),
+            n => format!(" (+{})", n - 1),
+        };
+        lines.push(Line::from(Span::styled(
+            truncate(&format!("⚠ {first}{more}"), w),
+            Style::default().fg(Color::Yellow),
+        )));
     }
     lines
 }

@@ -61,6 +61,8 @@ pub struct Client {
     pub rate_remaining: Option<u32>,
     cache: EtagCache,
     debug_log: Option<std::path::PathBuf>,
+    /// Workflow runs requested per fetch (`runs_limit` in the user config).
+    pub runs_limit: usize,
 }
 
 /// `GH_TOKEN` / `GITHUB_TOKEN`, else `gh auth token`.
@@ -198,6 +200,7 @@ impl Client {
             rate_remaining: None,
             cache: EtagCache::open(state_dir),
             debug_log,
+            runs_limit: RUNS_LIMIT,
         }
     }
 
@@ -447,8 +450,8 @@ impl Client {
     /// so the caller can keep what it had.
     fn fetch_runs(&mut self, repo: &RepoRef) -> Result<Option<Vec<WorkflowRun>>> {
         let url = format!(
-            "{API}/repos/{}/{}/actions/runs?per_page={RUNS_LIMIT}",
-            repo.owner, repo.name
+            "{API}/repos/{}/{}/actions/runs?per_page={}",
+            repo.owner, repo.name, self.runs_limit
         );
         match self.get_cached::<RunsPage>(&url) {
             Ok((items, _)) => Ok(Some(items.map(|p| p.workflow_runs).unwrap_or_default())),
