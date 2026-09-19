@@ -1,10 +1,10 @@
 # Project Memory
 
 ## Current State
-- **Active Milestone**: Auto-dock, configuration, and publishing (#2) — not started
-- **Current Issue**: None (next: #7 Auto-dock hooks)
-- **Current Branch**: main
-- **Plugin Version**: 1.2.1 (engineering-plugin)
+- **Active Milestone**: Auto-dock, configuration, and publishing (#2) — 0/3, in progress
+- **Current Issue**: #7 Auto-dock hooks (branch `issue-7-auto-dock`)
+- **Current Branch**: issue-7-auto-dock
+- **Plugin Version**: 1.3.0 (engineering-plugin)
 
 ## Progress Log
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
@@ -48,6 +48,9 @@
 - [2026-09-04 09:30] @jwanga: Issue #6 done — PR #17 merged after a verification pass (two edge cases fixed: `created_at`-based new-item rule, `latest` kept across same-repo checkouts). Milestone 1 "Status pane core" complete (6/6): GitHub milestone closed, REQUIREMENTS box checked. Unguided scope = milestone, so this run stops here; run `/next` to start milestone 2 (issues #7–#9) or `/next all` to roll through everything.
 - [2026-09-04 09:30] @jwanga: Refreshed architecture diagram (trigger: issue-close #6, diagram type: flowchart)
 - [2026-09-04 09:30] @jwanga: Marketplace: the repo is indexed at herdr.dev/plugins (index `https://assets.herdr.dev/plugins/index.json`) as "GitHub Status" 0.1.0 since 2026-09-04 08:00 UTC; `herdr plugin install jwanga/herdr-plugin-github-status` builds from source until #9 ships prebuilt binaries.
+- [2026-09-18 17:00] @jwanga: `/next all` (unguided, scope = all). Housekeeping skipped per rules #4–#7. The invocation text was read as answers to the #7 gate, not a new feature: (1) keep auto-docking in workspaces that are not GitHub repositories; (2) never fight a manual pane resize. Remaining gate defaults accepted: hooks implemented in Rust (`dock ensure` / `dock startup`) behind `pane.sh` rather than a separate `ensure.sh`; lock + markers live in `HERDR_PLUGIN_STATE_DIR` rather than `$TMPDIR`; manual width is held in memory per pane (a persistent width is #8's `width` option). Architecture: designed directly (pragmatic option) — no architect agents were run.
+- [2026-09-18 17:40] @jwanga: Issue #7 implemented on `issue-7-auto-dock`: `state.rs` (per-tab docked record, snooze marker, mkdir lock), `sizer.rs` (pure `decide` → Keep/Snap/Adopt + debounced thread fed by crossterm `Resize`), `dock::{ensure, Startup, graceful close_all, measure, clamp_width}`, `herdr::{pane_send_keys, tab_ids}`, TUI snoozes its tab on a key quit (plugin panes only), manifest `[[events]]` ×4 + `[[startup]]`. 51 tests. Verified live in herdr 0.8.0: `tab.created` hook docked an unfocused tab at 26 cols without taking focus; re-running ensure is a no-op; toggle closes via `ctrl+q` in ~90 ms and snoozes; ensure respects the snooze; toggle reopens and clears it; moving the surrounding split snaps back to 26; a manual edge drag (26→44→18) is adopted and then held when the surrounding split changes (would have scaled to ~13); `q` writes the snooze. Learned: herdr hot-reloads a linked manifest, so the hooks went live in the running session as soon as the manifest was saved.
+- [2026-09-18 18:15] @jwanga: PR #18 reviewed by 3 agents (0 Critical, 7 Important) — all auto-fixed (rule #15): `ensure` re-checks the docked record and re-lists panes *under* the lock (check-then-lock race with a stale pane snapshot); explicit open/toggle now shares the per-tab lock (waits ≤3 s) and anchors only on panes of the target tab; stale-lock takeover is an atomic `rename`, and `Lock::drop` only removes a lock whose `owner` file still names this process; the sizer runs only in the plugin's pane (`is_plugin_pane()`, shared with the quit-snooze) so a hand-run binary cannot shrink a shell pane; a 3 s quiet period after every self-made snap (not just startup) stops an off-by-one snap being adopted as manual; `widths()` helper replaces three width lookups; `Opened::Pane(String)`; `poll.rs` uses `state::dir()`; wrapper-script and REQUIREMENTS comments mention the hooks. 52 tests. Re-verified live: 5 concurrent `ensure` + 1 `open` on a fresh tab → exactly one pane, no leftover locks; manual drag adopted. Info (not fixed): tab ids are assumed not to be reused across herdr restarts (a surviving snooze would otherwise apply to a different tab); `state.rs` tests leave temp dirs behind.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->
@@ -56,6 +59,8 @@
 - [2026-09-04 00:25] @jwanga: "Real time" = conditional-request polling (ETag) every 10 s (5 s while runs are active) plus snapshot diffing into an activity feed. GitHub has no push channel to a local TUI without webhooks; ETag 304s do not count against the rate limit.
 - [2026-09-04 00:25] @jwanga: Plugin id `jwanga.github-status`, pane id `status`, binary `herdr-github-status`.
 - [2026-09-04 05:30] @jwanga: Descoped from issue #4 deliberately: the REST reviews fallback covers only the current branch's PR, not every open PR — fetching reviews per PR without a token would exhaust GitHub's 60 requests/hour in minutes.
+- [2026-09-18 17:40] @jwanga: Auto-dock rule = "dock a tab at most once per herdr session". A `docked/<tab>` record whose pane is gone means the user closed it (by any means, including herdr's close-pane, which the TUI cannot observe) → stay closed; `snoozed/<tab>` (written by `q`/toggle/close) additionally survives restarts; `[[startup]]` drops records of panes that a restart did not restore. Alternative rejected: snooze-only — a pane closed with herdr's close-pane would pop back on the next focus event.
+- [2026-09-18 17:40] @jwanga: Resize rule: pane width ≠ desired and the enclosing split's total changed → snap back; total unchanged → the user dragged the edge → adopt. A 3 s startup grace ignores the intermediate widths of `dock open`'s own snap.
 
 ## Notes
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

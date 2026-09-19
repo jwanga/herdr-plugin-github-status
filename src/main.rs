@@ -2,7 +2,7 @@
 //!
 //! Invocations:
 //! - `herdr-github-status`                 run the status TUI (the plugin pane entrypoint)
-//! - `herdr-github-status dock <mode>`     open / close / toggle the pane (action entrypoint)
+//! - `herdr-github-status dock <mode>`     toggle | open | close (actions), ensure | startup (hooks)
 //! - `herdr-github-status sidebar-width`   print the column width the pane will use
 //! - `herdr-github-status --version`
 
@@ -15,6 +15,8 @@ mod herdr;
 mod model;
 mod poll;
 mod repo;
+mod sizer;
+mod state;
 mod ui;
 mod util;
 
@@ -24,6 +26,12 @@ pub const BIN_NAME: &str = "herdr-github-status";
 pub const PLUGIN_ID: &str = "jwanga.github-status";
 pub const PANE_ENTRYPOINT: &str = "status";
 pub const PANE_LABEL: &str = "status";
+
+/// Whether this process is the plugin's pane (herdr sets the entrypoint id), as opposed
+/// to the binary run by hand in some other pane.
+pub fn is_plugin_pane() -> bool {
+    std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some()
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,7 +52,7 @@ fn main() -> ExitCode {
             .parse::<dock::Mode>()
             .and_then(dock::run),
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command '{other}'; use: dock <toggle|open|close>, sidebar-width, --version"
+            "unknown command '{other}'; use: dock <toggle|open|close|ensure|startup>, sidebar-width, --version"
         )),
     };
     match result {

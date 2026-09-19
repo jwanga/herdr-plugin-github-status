@@ -1,6 +1,6 @@
 #!/bin/sh
-# Single entrypoint for both the pane (no arguments: run the TUI) and the actions
-# (`launch.sh dock <mode>`). Fixes PATH (herdr runs plugin commands with a minimal one)
+# Single entrypoint for the pane (no arguments: run the TUI) and for the actions and
+# hooks (`launch.sh dock <mode>`). Fixes PATH (herdr runs plugin commands with a minimal one)
 # and locates the binary for installed (bin/) and linked (target/release/) checkouts.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"

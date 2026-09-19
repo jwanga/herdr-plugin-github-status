@@ -45,3 +45,25 @@ title = "GitHub Status: close pane"
 description = "Close every status pane in this workspace."
 contexts = ["workspace", "pane"]
 command = ["bash", "herdr/pane.sh", "close"]
+
+# Auto-dock: keep a status pane in every tab. `dock ensure` is idempotent, locks per tab,
+# never takes focus, and leaves a tab alone once its pane has been closed (toggle reopens).
+[[events]]
+on = "workspace.created"
+command = ["bash", "herdr/pane.sh", "ensure"]
+
+[[events]]
+on = "tab.created"
+command = ["bash", "herdr/pane.sh", "ensure"]
+
+[[events]]
+on = "tab.focused"
+command = ["bash", "herdr/pane.sh", "ensure"]
+
+[[events]]
+on = "pane.focused"
+command = ["bash", "herdr/pane.sh", "ensure"]
+
+# After a herdr restart, forget docked panes that were not restored so their tabs dock again.
+[[startup]]
+command = ["bash", "herdr/pane.sh", "startup"]

@@ -99,6 +99,19 @@ pub fn pane_list(workspace: Option<&str>) -> Result<Vec<Pane>> {
     Ok(serde_json::from_value(panes)?)
 }
 
+/// Ids of every tab in every workspace.
+pub fn tab_ids() -> Result<Vec<String>> {
+    let result = call(&["tab", "list"])?;
+    let tabs = result
+        .get("tabs")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| anyhow!("tab list: missing tabs"))?;
+    Ok(tabs
+        .iter()
+        .filter_map(|t| t.get("tab_id")?.as_str().map(str::to_string))
+        .collect())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Agent {
     pub pane_id: String,
@@ -256,6 +269,13 @@ pub fn pane_close(pane: &str) -> Result<()> {
         Err(err) if is_not_found(&err) => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+pub fn pane_send_keys(pane: &str, keys: &[&str]) -> Result<()> {
+    let mut args = vec!["pane", "send-keys", pane];
+    args.extend(keys);
+    call(&args)?;
+    Ok(())
 }
 
 pub fn pane_rename(pane: &str, label: &str) -> Result<()> {
