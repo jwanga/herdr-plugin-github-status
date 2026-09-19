@@ -5,9 +5,10 @@
 #
 # The pane command runs the launcher by absolute path under $HERDR_PLUGIN_ROOT: pane
 # commands resolve against the pane's cwd (the project), not the plugin root.
-# herdr/launch.sh prefers bin/ and falls back to target/release/, which the interim
-# [[build]] step below produces on `plugin install`. Prebuilt release binaries (into
-# bin/) arrive with the publishing milestone.
+# herdr/launch.sh prefers bin/ and falls back to target/release/. On `plugin install` the
+# [[build]] step fills bin/: the prebuilt release binary for this version and platform
+# (SHA-256 verified), else a `cargo build --release`. Keep `version` equal to Cargo.toml's
+# (CI checks); the release tag is `v<version>`.
 
 id = "jwanga.github-status"
 name = "GitHub Status"
@@ -17,7 +18,7 @@ platforms = ["macos", "linux"]
 description = "Real-time project status pane: GitHub milestones, issues, pull requests, and Actions, docked on the right at sidebar width."
 
 [[build]]
-command = ["sh", "-c", "export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; cargo build --release"]
+command = ["sh", "scripts/fetch-or-build.sh"]
 
 [[panes]]
 id = "status"
