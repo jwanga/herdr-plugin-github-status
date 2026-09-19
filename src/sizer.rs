@@ -3,6 +3,7 @@
 //! user makes by hand (same surrounding width, different pane width) is adopted as the
 //! new width instead of being fought.
 
+use crate::config::Width;
 use crate::dock;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -37,7 +38,7 @@ pub fn decide(last_total: Option<u32>, total: u32, width: u32, desired: u32) -> 
 /// Spawn the sizer for this process's own pane. Send `()` on every terminal resize.
 /// `None` unless this is the plugin's pane: a hand-run binary must not resize the shell
 /// pane it was started from.
-pub fn spawn() -> Option<Sender<()>> {
+pub fn spawn(width: Width) -> Option<Sender<()>> {
     if !crate::is_plugin_pane() {
         return None;
     }
@@ -45,11 +46,11 @@ pub fn spawn() -> Option<Sender<()>> {
         .ok()
         .filter(|p| !p.is_empty())?;
     let (tx, rx) = mpsc::channel::<()>();
-    std::thread::spawn(move || run(&pane, &rx));
+    std::thread::spawn(move || run(&pane, width, &rx));
     Some(tx)
 }
 
-fn run(pane: &str, rx: &Receiver<()>) {
+fn run(pane: &str, configured: Width, rx: &Receiver<()>) {
     let mut quiet_until = Instant::now() + SELF_RESIZE_QUIET;
     let mut manual: Option<u32> = None;
     let mut last_total = dock::measure(pane).ok().map(|(total, _)| total);
@@ -59,7 +60,7 @@ fn run(pane: &str, rx: &Receiver<()>) {
         let Ok((total, width)) = dock::measure(pane) else {
             continue;
         };
-        let desired = manual.unwrap_or_else(dock::sidebar_width);
+        let desired = manual.unwrap_or_else(|| dock::target_width(configured));
         match decide(last_total, total, width, desired) {
             Decision::Keep => {}
             Decision::Snap(cols) => {

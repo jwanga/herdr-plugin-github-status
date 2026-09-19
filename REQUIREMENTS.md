@@ -54,7 +54,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 - Mouse: click to select/expand, wheel to scroll.
 
 ### Configuration
-- `config.toml` in `HERDR_PLUGIN_CONFIG_DIR` (fallback `herdr plugin config-dir`): `poll_interval_secs`, `active_poll_interval_secs`, `width` (`sidebar` or a column count), `auto_open`, `sections` order/visibility, `recent_window_hours`.
+- `config.toml` in `HERDR_PLUGIN_CONFIG_DIR` (fallback `herdr plugin config-dir`): `poll_interval_secs`, `active_poll_interval_secs`, `width` (`sidebar` or a column count), `auto_open`, `sections` order/visibility, `recent_window_minutes`, `recent_closed_hours`, `runs_limit`. Each option is validated on its own: an invalid or unknown one falls back to its default and adds a warning line under the header (all warnings are listed in the `?` overlay); the dock actions and hooks ignore warnings and use whatever parsed. Options are read at launch.
 - Runtime state (ETags with their cached responses, ≤2 MB; snooze markers) in `HERDR_PLUGIN_STATE_DIR`.
 
 ### Packaging and distribution
@@ -75,6 +75,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
   - `main.rs` — CLI: default runs the TUI; `dock <toggle|open|close>` implements the actions and `dock <ensure|startup>` the hooks; `sidebar-width` prints the target width.
   - `dock.rs` — dock logic: sidebar width, split-target selection, open + exact-width snap, per-tab detection of existing status panes via `pane process-info`, the auto-dock `ensure` hook, graceful close.
   - `state.rs` — per-tab files in the state directory: docked pane record, snooze marker, hook lock.
+  - `config.rs` — `config.toml` loading, per-option validation with warnings, defaults.
   - `sizer.rs` — background thread in the TUI that, on terminal resize events, re-snaps the pane width or adopts a manual resize.
   - `herdr.rs` — wrapper over `HERDR_BIN_PATH` JSON commands (pane list/layout/resize/rename/close, plugin pane open, agent list) with typed errors.
   - `repo.rs` — cwd → owner/repo + branch resolution via git.
@@ -84,4 +85,3 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
   - `activity.rs` — diff of consecutive snapshots → activity events.
   - `poll.rs` — background thread scheduling fetches; sends snapshots over a channel.
   - `ui/` — ratatui rendering: header, section tree, activity feed, help overlay; 26-column-aware truncation.
-  - `config.rs` — config file + defaults.
