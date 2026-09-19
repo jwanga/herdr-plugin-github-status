@@ -42,10 +42,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both macOS targets build on the Apple-silicon runner: GitHub has retired its
+          # Intel macOS images, and cargo cross-compiles x86_64-apple-darwin with Xcode's
+          # clang once the target is installed.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
@@ -86,7 +89,9 @@ jobs:
   publish:
     name: attach to release
     needs: build
-    if: github.ref_type == 'tag'
+    # Publish whatever built: one broken target must not withhold the other platforms'
+    # binaries (scripts/fetch-or-build.sh falls back to a source build for a missing one).
+    if: github.ref_type == 'tag' && !cancelled()
     runs-on: ubuntu-latest
     permissions:
       contents: write

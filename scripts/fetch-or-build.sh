@@ -11,7 +11,7 @@ set -eu
 
 BIN=herdr-github-status
 REPO=jwanga/herdr-plugin-github-status
-export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH="${HOME:-}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
