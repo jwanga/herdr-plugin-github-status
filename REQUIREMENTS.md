@@ -69,7 +69,7 @@ A herdr plugin that docks a persistent, real-time project **status** pane on the
 - Never write to the GitHub repository; the pane is read-only.
 
 ## Architecture
-- **`herdr-plugin.toml`** — manifest: pane `status`, actions `open`/`close`/`toggle`, auto-dock event hooks, startup hook, build step.
+- **`herdr-plugin.toml`** — manifest: pane `status`, actions `open`/`close`/`toggle`, auto-dock event hooks, startup hook, `[[build]]` step (`scripts/fetch-or-build.sh`).
 - **`herdr/launch.sh`** — single entrypoint: fixes PATH, finds the binary (`bin/` then `target/release/`), runs the TUI with no arguments or forwards `dock <mode>`; `herdr/pane.sh` is the action wrapper that calls it.
 - **Rust crate `herdr-github-status`** (`src/`):
   - `main.rs` — CLI: default runs the TUI; `dock <toggle|open|close>` implements the actions and `dock <ensure|startup>` the hooks; `sidebar-width` prints the target width.

@@ -2,8 +2,8 @@
 
 ## Current State
 - **Active Milestone**: Auto-dock, configuration, and publishing (#2) — 0/3, in progress
-- **Current Issue**: #8 User configuration (branch `issue-8-config`, PR stacked on #18); #7 is done in PR #18, **awaiting a manual merge**
-- **Current Branch**: issue-8-config
+- **Current Issue**: #9 Release workflow (branch `issue-9-release`, PR stacked on #19 → #18). #7 (PR #18) and #8 (PR #19) are reviewed, fixed and CI-green, **awaiting a manual merge** in that order
+- **Current Branch**: issue-9-release
 - **Plugin Version**: 1.3.0 (engineering-plugin)
 
 ## Progress Log
@@ -55,6 +55,8 @@
 - [2026-09-18 19:10] @jwanga: Issue #8 gate — defaults accepted (no substantive open questions): hand-validated `toml` table (new dependency `toml` 0.8, parse-only) so each option fails independently; config is read at launch (no hot reload); warnings = one yellow header line + full list in `?`; `sections` lists what is shown, in order; `width` 16–200 or "sidebar". Architecture designed directly (pragmatic option).
 - [2026-09-18 19:10] @jwanga: Issue #8 implemented on `issue-8-config`: `config.rs` (`Config`, `Width`, `Loaded{config,warnings}`, `parse`, `load`, `dir`), `tree::{ViewOptions, flatten_with, Section::{ALL,key,from_key}}` (sections emitted in configured order), `App::with_config`, `header::rows` + warning line, `help::lines(w, warnings)`, `poll::spawn(cwd, &Config)`, `Client::runs_limit`, `dock::target_width`, `ensure` honours `auto_open`, sizer holds the configured width. 58 tests. Verified live with a scratch `HERDR_PLUGIN_CONFIG_DIR`: sections reordered/hidden, `runs_limit = 3`, `⚠ colour: unknown option (+1)` under the header and both problems listed in `?`, toggle docked at 40 columns, `auto_open = false` → `ensure: auto_open is off`.
 - [2026-09-18 19:40] @jwanga: PR #19 reviewed by 3 agents (0 Critical, 4 distinct Important; the correctness review was clean) — all auto-fixed (rule #15): `sidebar-width` now prints `target_width(config.width)` (it ignored `width`); `App::with_config` is the one constructor and `App::new` a test-only default on top of it; the `#[cfg(test)] flatten` wrapper is gone (`flatten` takes `&ViewOptions`); duplicate `config.rs` line removed from REQUIREMENTS; `config::dir()` prefers `HERDR_PLUGIN_ID` like `open()`; interval constants documented as defaults. Reviewer measured the `toml` dependency at +166 KB (+7 %) on the stripped release binary — kept. Info (not fixed): `dock::run` loads the config even for `close`; the section bodies live in one long `match` in `tree::flatten`.
+- [2026-09-18 20:10] @jwanga: Issue #9 gate — defaults accepted: asset names `herdr-github-status-<target-triple>` + `.sha256` sidecar (ecosystem convention); Linux targets built with `cross` (rustls/ring needs a C toolchain for musl); the publish job uploads to the tag's existing Release (created by `/release`) and only creates a bare one if missing; PRs touching the release machinery run the four builds without publishing; `## Releases` config added to INSTRUCTIONS.md (`mode: single`, manifests Cargo.toml + herdr-plugin.toml + Cargo.lock). License, public repo and the `herdr-plugin` topic were already done on 2026-09-04.
+- [2026-09-18 20:10] @jwanga: Issue #9 implemented on `issue-9-release`: `.github/workflows/release.yml`, `scripts/fetch-or-build.sh` (manifest `[[build]]`), `scripts/check-versions.sh` (CI + release), README install/update. Verified locally: no release for v0.1.0 → 404 → source build into `bin/` under a minimal `env -i` PATH; a fake `file://` release with a good checksum installs the prebuilt binary and runs `--version`; a bad checksum is rejected and falls back to the source build; version check passes and rejects a wrong tag. Not verifiable before a tag exists: the publish job and the real download from GitHub.
 
 ## Key Decisions
 <!-- Each entry MUST use the format: [YYYY-MM-DD HH:MM] @username: description -->

@@ -11,9 +11,16 @@ A [herdr](https://herdr.dev) plugin that docks a real-time **status** pane on th
 ## Installation
 Requires herdr ≥ 0.8.0 and `git`. Recommended: an authenticated GitHub CLI (`gh auth login`) or a `GH_TOKEN` / `GITHUB_TOKEN` environment variable, needed for private repositories and the higher rate limit.
 
-From GitHub (builds from source with `cargo` on install; prebuilt binaries arrive with the publishing milestone):
+```sh
+herdr plugin install jwanga/herdr-plugin-github-status
+```
+
+The install step downloads the prebuilt binary for your platform from the matching GitHub Release and verifies its SHA-256 (macOS arm64/x86_64, Linux x86_64/aarch64, static musl), so no Rust toolchain is needed. If there is no prebuilt binary for the version or platform, or the download cannot be verified, it builds from source instead, which needs `cargo` ([rustup.rs](https://rustup.rs)).
+
+To update, reinstall; your `config.toml` is kept:
 
 ```sh
+herdr plugin uninstall jwanga.github-status
 herdr plugin install jwanga/herdr-plugin-github-status
 ```
 
